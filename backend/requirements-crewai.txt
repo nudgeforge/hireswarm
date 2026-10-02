@@ -1,0 +1,4 @@
+-r requirements.txt
+# Enable this optional extra only when USE_CREWAI=true and a free Groq/Gemini key is configured.
+crewai>=0.100
+litellm>=1.60

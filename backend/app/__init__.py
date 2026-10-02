@@ -1,0 +1,1 @@
+"""HireSwarm FastAPI backend."""

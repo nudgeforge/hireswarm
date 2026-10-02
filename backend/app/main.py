@@ -1,0 +1,623 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from docx import Document
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pypdf import PdfReader
+
+from .crewai_engine import available as crewai_available, run_optional_crew
+from .data import DEMO_CANDIDATE, DEMO_JOBS
+from .documents import build_docx, build_pdf, export_readiness
+from .evidence import build_cover_letter, build_interview, build_safe_patches, cover_letter_evidence_ids, extract_evidence_from_resume, score_job, validate_patches
+from .schemas import CandidateInput, EventPayload, ManualJobInput, PublicBoardInput, RunCreate, RunStatus
+from .sources import extract_skills, fetch_arbeitnow, fetch_greenhouse, fetch_lever, fetch_remotive, matches_query
+
+app = FastAPI(
+    title="HireSwarm API",
+    description="Evidence-locked reverse recruiting and simulated interview engine",
+    version="1.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+RUNS: dict[str, RunStatus] = {}
+JOBS: dict[str, dict[str, Any]] = {job["id"]: copy.deepcopy(job) for job in DEMO_JOBS}
+# Remotive asks clients to poll sparingly. Cache its unfiltered public feed so
+# later searches can be correctly filtered without re-fetching or leaking jobs
+# from another provider into a source-specific result.
+REMOTIVE_CACHE: list[dict[str, Any]] = []
+REMOTIVE_CACHE_AT: datetime | None = None
+REMOTIVE_CACHE_ERROR: str | None = None
+LIVE_CACHE_TTL = timedelta(hours=6)
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def event(run: RunStatus, type_: str, title: str, message: str | None = None, agent: str | None = None, payload: dict[str, Any] | None = None) -> None:
+    run.events.append(EventPayload(type=type_, title=title, message=message, agent=agent, payload=payload or {}, at=now()))
+
+
+def candidate_as_dict(candidate: CandidateInput | None) -> dict[str, Any]:
+    # Only an omitted candidate opts into the explicitly labeled practice profile.
+    # Never replace an applicant-supplied (possibly incomplete) profile with demo evidence.
+    if candidate is None:
+        return copy.deepcopy(DEMO_CANDIDATE)
+    return candidate.model_dump()
+
+
+def normalized_job(job: dict[str, Any]) -> dict[str, Any]:
+    response = dict(job)
+    response.pop("interview_questions", None)
+    origin = response.get("origin")
+    response.setdefault("retrieved_at", None)
+    response.setdefault("cache_state", "fixture" if origin == "demo_fixture" else "candidate" if origin == "user_pasted" else "fresh")
+    return response
+
+
+def checked_application_url(value: str) -> str:
+    """Accept only a normal web URL before the browser is allowed to open it."""
+    url = value.strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="Use a full http:// or https:// official listing URL, or leave it blank.")
+    return url
+
+
+def required_manual_text(value: str, field: str, minimum: int = 2) -> str:
+    cleaned = value.strip()
+    if len(cleaned) < minimum:
+        raise HTTPException(status_code=422, detail=f"{field} needs at least {minimum} non-space characters.")
+    return cleaned
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"service": "HireSwarm API", "mode": "evidence_lab"}
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "service": "HireSwarm Evidence Lab",
+        "mode": "deterministic evidence engine",
+        "optional_crewai": bool(os.getenv("USE_CREWAI")),
+        "time": now(),
+    }
+
+
+@app.get("/api/candidate/demo")
+async def demo_candidate() -> dict[str, Any]:
+    return copy.deepcopy(DEMO_CANDIDATE)
+
+
+@app.post("/api/candidate/normalize")
+async def normalize_candidate(payload: CandidateInput) -> dict[str, Any]:
+    candidate = payload.model_dump()
+    # A refresh must never retain stale proof from an older resume. If the
+    # current text produces no literal action/impact statements, return an
+    # empty ledger and let the UI ask the applicant to correct the source.
+    candidate["evidence"] = extract_evidence_from_resume(candidate.get("resume_text", ""))
+    return candidate
+
+
+MAX_UPLOAD_BYTES = 6 * 1024 * 1024
+
+
+def _candidate_from_text(text: str, filename: str) -> CandidateInput:
+    clean_lines = [line.strip() for line in text.replace("\r", "").split("\n") if line.strip()]
+    if len(text.strip()) < 80:
+        raise ValueError("We could not extract enough readable text. If this is a scanned PDF, upload a text-based PDF, DOCX, or TXT file instead.")
+    first = clean_lines[0] if clean_lines else "Imported applicant"
+    # Resumes conventionally start with a name; avoid treating a long section heading as one.
+    name = first[:90] if 1 < len(first.split()) <= 6 and len(first) < 70 else "Imported applicant"
+    headline = clean_lines[1][:140] if len(clean_lines) > 1 and len(clean_lines[1]) < 160 else "Applicant-controlled profile"
+    evidence = extract_evidence_from_resume(text)
+    if not evidence:
+        raise ValueError("Readable text was found, but no reviewable experience statements could be safely extracted. You can paste and edit the text instead.")
+    return CandidateInput(
+        name=name,
+        headline=headline,
+        location="Location not specified",
+        preferences=["Applicant-controlled", "Imported CV"],
+        resume_text=text[:50000],
+        evidence=evidence,
+    )
+
+
+@app.post("/api/candidate/upload")
+async def upload_candidate_cv(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Parse a local applicant document in-memory. The original binary is not retained."""
+    filename = file.filename or "candidate-document"
+    extension = Path(filename).suffix.lower()
+    if extension not in {".pdf", ".docx", ".txt"}:
+        raise HTTPException(status_code=415, detail="Upload a .pdf, .docx, or .txt resume.")
+    blob = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Keep the resume under 6 MB. The file is processed only for this session.")
+    try:
+        if extension == ".pdf":
+            text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(blob)).pages)
+        elif extension == ".docx":
+            text = "\n".join(paragraph.text for paragraph in Document(BytesIO(blob)).paragraphs)
+        else:
+            text = blob.decode("utf-8", errors="replace")
+        candidate = _candidate_from_text(text, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="We could not read that document. Try a text-based PDF, DOCX, or TXT version.") from exc
+    return {
+        "candidate": candidate.model_dump(),
+        "import": {
+            "filename": filename,
+            "format": extension.lstrip("."),
+            "characters_read": len(text),
+            "evidence_count": len(candidate.evidence),
+            "retention": "The source file is parsed in memory and is not stored by HireSwarm.",
+        },
+    }
+
+
+@app.get("/api/jobs")
+async def list_jobs(mode: str = "demo", query: str = "") -> dict[str, Any]:
+    """Return visibly-labelled fixtures or a cached, real public-source result."""
+    if mode != "live":
+        return {
+            "mode": "demo_fixture",
+            "jobs": [normalized_job(job) for job in JOBS.values() if job.get("origin") == "demo_fixture"],
+            "provenance": {"label": "Practice fixtures", "retrieved_at": None, "cache_state": "fixture"},
+        }
+    return await public_jobs(query=query)
+
+
+async def _remotive_results(query: str) -> tuple[list[dict[str, Any]], str, list[str]]:
+    """Return query-filtered Remotive jobs from a cache of the raw public feed."""
+    global REMOTIVE_CACHE_AT, REMOTIVE_CACHE_ERROR
+    cache_valid = bool(REMOTIVE_CACHE and REMOTIVE_CACHE_AT and datetime.now(timezone.utc) - REMOTIVE_CACHE_AT < LIVE_CACHE_TTL)
+    if not cache_valid:
+        try:
+            # Fetch the source once without a search restriction; every later
+            # query is evaluated locally against this same complete cache.
+            fresh = await fetch_remotive(query="", limit=50)
+            retrieved_at = now()
+            for job in fresh:
+                job["retrieved_at"] = retrieved_at
+                job["cache_state"] = "fresh"
+            REMOTIVE_CACHE[:] = fresh
+            REMOTIVE_CACHE_AT = datetime.now(timezone.utc)
+            REMOTIVE_CACHE_ERROR = None
+        except Exception:
+            REMOTIVE_CACHE_ERROR = "Remotive is temporarily unavailable. No simulated listing was substituted."
+            return [], "unavailable", [REMOTIVE_CACHE_ERROR]
+
+    cache_state = "cached" if cache_valid else "fresh"
+    filtered = [dict(job, cache_state=cache_state) for job in REMOTIVE_CACHE if matches_query(job, query)]
+    errors = [REMOTIVE_CACHE_ERROR] if REMOTIVE_CACHE_ERROR else []
+    return filtered[:18], cache_state, errors
+
+
+async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
+    """Fetch user-requested public roles with provider-correct caching/provenance."""
+    jobs: list[dict[str, Any]] = []
+    errors: list[str] = []
+    cache_states: list[str] = []
+
+    if source in {"all", "remotive"}:
+        remotive, state, remotive_errors = await _remotive_results(query)
+        jobs.extend(remotive)
+        cache_states.append(state)
+        errors.extend(remotive_errors)
+
+    if source in {"all", "arbeitnow"}:
+        try:
+            arbeitnow = await fetch_arbeitnow(query=query, limit=18)
+            retrieved_at = now()
+            for job in arbeitnow:
+                job["retrieved_at"] = retrieved_at
+                job["cache_state"] = "fresh"
+            jobs.extend(arbeitnow)
+            cache_states.append("fresh")
+        except Exception:
+            errors.append("Arbeitnow is temporarily unavailable. You can still paste a role or connect a public ATS board.")
+            cache_states.append("unavailable")
+
+    deduped = list({job["id"]: job for job in jobs}.values())[:24]
+    JOBS.update({job["id"]: job for job in deduped})
+    available_states = {state for state in cache_states if state != "unavailable"}
+    cache_state = "mixed" if len(available_states) > 1 else next(iter(available_states), "unavailable")
+    retrieved_values = [job.get("retrieved_at") for job in deduped if job.get("retrieved_at")]
+    return {
+        "mode": "live_public" if deduped else "live_unavailable",
+        "jobs": [normalized_job(job) for job in deduped],
+        "provenance": {
+            "label": "Published public job feeds",
+            "retrieved_at": max(retrieved_values) if retrieved_values else None,
+            "cache_state": cache_state,
+            "polling_policy": "Remotive results are cached for six hours; Arbeitnow is fetched only when you request it. HireSwarm never submits an application.",
+        },
+        "source_errors": errors,
+    }
+
+
+@app.get("/api/jobs/live")
+async def list_live_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
+    if source not in {"all", "remotive", "arbeitnow"}:
+        raise HTTPException(status_code=422, detail="Use all, remotive, or arbeitnow for public feed discovery.")
+    return await public_jobs(query=query, source=source)
+
+
+@app.post("/api/jobs/public-board")
+async def import_public_board(payload: PublicBoardInput) -> dict[str, Any]:
+    """Read a user-selected public Greenhouse/Lever board without employer credentials."""
+    try:
+        jobs = await (fetch_greenhouse(payload.board) if payload.source == "greenhouse" else fetch_lever(payload.board))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="That public board could not be reached. Check the public board URL or paste the job description instead.") from exc
+    if not jobs:
+        raise HTTPException(status_code=404, detail="No published roles were found on that public board.")
+    retrieved_at = now()
+    for job in jobs:
+        job["retrieved_at"] = retrieved_at
+        job["cache_state"] = "fresh"
+    JOBS.update({job["id"]: job for job in jobs})
+    return {
+        "mode": "live_public_board",
+        "jobs": [normalized_job(job) for job in jobs],
+        "provenance": {"label": f"Official {payload.source.title()} public board", "retrieved_at": retrieved_at, "cache_state": "fresh", "board": payload.board},
+    }
+
+
+@app.post("/api/jobs/manual")
+async def manual_job(payload: ManualJobInput) -> dict[str, Any]:
+    """Create an applicant-controlled target from pasted role text.
+
+    We infer only controlled taxonomy terms, then label generic fallbacks rather
+    than pretending an unknown phrase is a verified technical requirement.
+    """
+    title = required_manual_text(payload.title, "Role title")
+    company = required_manual_text(payload.company, "Company")
+    official_url = checked_application_url(payload.url)
+    description = required_manual_text(payload.description, "Role description", minimum=20)
+    location = payload.location.strip() or "Not specified"
+    required = extract_skills(description, limit=12)
+    if not required:
+        required = ["Communication", "Relevant project experience"]
+    job_id = f"manual-{uuid.uuid4().hex[:8]}"
+    job = {
+        "id": job_id,
+        "origin": "user_pasted",
+        "source": "User-pasted description",
+        "title": title,
+        "company": company,
+        "location": location,
+        "type": "Not specified",
+        "salary": "Not disclosed",
+        "posted": "Just added",
+        "retrieved_at": now(),
+        "cache_state": "candidate",
+        "url": official_url,
+        "description": description,
+        "must_have": required[:5],
+        "preferred": required[5:],
+        "interview_questions": [],
+    }
+    JOBS[job_id] = job
+    return normalized_job(job)
+
+
+async def execute_mission(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any], mode: str) -> None:
+    """Run optional provider-backed CrewAI enrichment, then the authoritative evidence flow."""
+    if mode == "crewai":
+        if crewai_available():
+            event(run, "agent_active", "CrewAI relay connected", "A free-provider CrewAI narrative pass is running before evidence validation.", "Mission Conductor", {"phase": "crewai_enrichment"})
+            try:
+                narrative = await asyncio.to_thread(run_optional_crew, job, candidate)
+                event(run, "crewai_enrichment", "CrewAI relay returned", "Provider narrative is available; deterministic evidence rules remain authoritative.", "Mission Conductor", {"provider": narrative.get("provider", "configured provider")})
+            except Exception as exc:
+                event(run, "crewai_fallback", "CrewAI relay unavailable", f"Falling back to the local Evidence Lab: {str(exc)[:120]}", "Mission Conductor")
+        else:
+            event(run, "crewai_fallback", "CrewAI credentials not enabled", "Continuing with the fully functional local Evidence Lab. Add a free Groq or Gemini key to enable provider-backed narration.", "Mission Conductor")
+    await execute_evidence_lab(run, job, candidate)
+
+
+async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any]) -> None:
+    try:
+        run.status = "running"
+        event(run, "run_started", "Mission started", "Evidence Lab is mapping candidate claims against the target role.", "Mission Conductor")
+        await asyncio.sleep(0.55)
+
+        event(run, "agent_active", "Market Scout scanning", "Extracting must-have skills and checking source-linked evidence.", "Market Scout", {"phase": "mapping"})
+        await asyncio.sleep(0.85)
+        match = score_job(job, candidate)
+        event(run, "market_report", "Opportunity map generated", f"{job['title']} scored {match['score']}% evidence fit.", "Market Scout", {
+            "job_id": job["id"],
+            "score": match["score"],
+            "coverage": match["coverage"],
+            "verified_strengths": match["verified_strengths"],
+            "adjacent_strengths": match["adjacent_strengths"],
+            "gaps": match["gaps"],
+        })
+        await asyncio.sleep(0.55)
+
+        event(run, "agent_active", "Candidate Twin assembling", "Binding answers to the evidence ledger. Unsupported claims will be blocked.", "Candidate Twin", {"phase": "evidence_binding"})
+        await asyncio.sleep(0.8)
+        evidence_count = len(candidate.get("evidence", []))
+        event(run, "candidate_twin_ready", "Digital Twin verified", f"{evidence_count} evidence nodes are available for interview responses.", "Candidate Twin", {
+            "name": candidate.get("name", "Candidate"),
+            "headline": candidate.get("headline", ""),
+            "evidence_count": evidence_count,
+        })
+        await asyncio.sleep(0.55)
+
+        interview = build_interview(job, candidate, match)
+        verdicts = []
+        for index, turn in enumerate(interview[:4], start=1):
+            event(run, "agent_active", f"HR round {index} of {min(4, len(interview))}", f"Testing {turn['requirement']} against verified evidence.", "HR Interrogator", {"round": index})
+            await asyncio.sleep(0.45)
+            event(run, "interview_question", f"Question {index}: {turn['requirement']}", turn["question"], "HR Interrogator", {
+                "round": index,
+                "requirement": turn["requirement"],
+                "question": turn["question"],
+            })
+            await asyncio.sleep(0.75)
+            event(run, "candidate_answer", turn["status"], turn["answer"], "Candidate Twin", {
+                "round": index,
+                "status": turn["status"],
+                "answer": turn["answer"],
+                "evidence_ids": turn.get("evidence_ids", []),
+            })
+            await asyncio.sleep(0.55)
+            event_type = "gap_detected" if turn["status"] != "SUPPORTED" else "interview_verdict"
+            event(run, event_type, "Evidence verdict", turn["verdict"], "HR Interrogator", {
+                "round": index,
+                "requirement": turn["requirement"],
+                "status": turn["status"],
+                "evidence_ids": turn.get("evidence_ids", []),
+                "verdict": turn["verdict"],
+            })
+            verdicts.append(turn)
+            await asyncio.sleep(0.45)
+
+        event(run, "agent_active", "Resume Surgeon preparing patch", "Converting verified evidence into job-relevant document edits.", "Resume Surgeon", {"phase": "patching"})
+        await asyncio.sleep(0.75)
+        patches = build_safe_patches(job, candidate, match)
+        validation = validate_patches(patches, candidate)
+        # Tailoring improves clarity, not the amount of direct evidence. Keep the metric honest.
+        coverage_after = match["coverage"]
+        cover_letter = build_cover_letter(job, candidate, match)
+        cover_letter_ids = cover_letter_evidence_ids(job, candidate, match)
+        safe_patches = validation["safe_patches"]
+        patch_title = "Truth-preserving edits ready" if safe_patches else "No safe role-specific edits"
+        patch_message = (
+            f"{len(safe_patches)} evidence-linked edits are ready for human review. Evidence coverage is unchanged by rewriting."
+            if safe_patches
+            else "No source-linked sentence directly supports this target yet. HireSwarm will keep the gap visible instead of exporting a generic packet."
+        )
+        event(run, "resume_patch", patch_title, patch_message, "Resume Surgeon", {
+            "patches": safe_patches,
+            "cover_letter": cover_letter,
+            "cover_letter_evidence_ids": cover_letter_ids,
+            "coverage_before": match["coverage"],
+            "coverage_after": coverage_after,
+            "unresolved_gaps": [item["skill"] for item in match["gaps"] if item.get("severity") in {"must_have", "preferred"}],
+        })
+        await asyncio.sleep(0.65)
+        blocked_count = len(validation["blocked_patches"])
+        event(run, "validation_result", "Evidence firewall passed", "Every proposed sentence has source-linked evidence." if not blocked_count else f"{blocked_count} unsupported edits were blocked.", "Evidence Validator", {
+            "all_claims_linked": validation["all_claims_linked"],
+            "safe_count": len(validation["safe_patches"]),
+            "blocked_count": blocked_count,
+        })
+        await asyncio.sleep(0.5)
+        if not safe_patches:
+            run.result = {
+                "job": normalized_job(job),
+                "candidate": {k: candidate.get(k) for k in ["name", "headline", "location"]},
+                "candidate_full": candidate,
+                "match": match,
+                "interview": verdicts,
+                "patches": [],
+                "cover_letter": cover_letter,
+                "cover_letter_evidence_ids": cover_letter_ids,
+                "coverage_before": match["coverage"],
+                "coverage_after": coverage_after,
+            }
+            run.status = "needs_evidence"
+            event(run, "evidence_needed", "More direct evidence is needed", "No safe, role-specific document revision was found. Add a literal project/experience statement or select a better-matched role before export.", "Evidence Validator", {
+                "gaps": [item["skill"] for item in match["gaps"]],
+                "coverage": match["coverage"],
+            })
+            return
+        run.result = {
+            "job": normalized_job(job),
+            "candidate": {k: candidate.get(k) for k in ["name", "headline", "location"]},
+            # Kept in volatile run memory only so an approved export can render a real document.
+            "candidate_full": candidate,
+            "match": match,
+            "interview": verdicts,
+            "patches": validation["safe_patches"],
+            "cover_letter": cover_letter,
+            "cover_letter_evidence_ids": cover_letter_ids,
+            "coverage_before": match["coverage"],
+            "coverage_after": coverage_after,
+        }
+        readiness = refresh_export_readiness(run)
+        event(run, "export_readiness", "Export readiness checked", "A generated one-column PDF was text-extracted to verify the document can be read back.", "Document QA", readiness)
+        if not readiness["passed"]:
+            run.status = "failed"
+            event(run, "run_failed", "Document QA blocked release", "The draft did not satisfy the server-side export checks, so approval and export remain locked.", "Evidence Validator", readiness)
+            return
+        run.status = "awaiting_approval"
+        event(run, "approval_required", "Human approval required", "Review evidence tags, accept the truthful patch, then export the application packet.", "HITL Release Custodian", {
+            "safe_patches": len(validation["safe_patches"]),
+            "unresolved_gaps": [item["skill"] for item in match["gaps"]],
+        })
+    except Exception as exc:
+        run.status = "failed"
+        event(run, "run_failed", "Mission paused", str(exc), "Mission Conductor")
+
+
+def packet_integrity_check(result: dict[str, Any]) -> dict[str, Any]:
+    """Ensure every released revision still maps to a verified ledger node."""
+    patches = result.get("patches") or []
+    candidate = result.get("candidate_full")
+    if not isinstance(candidate, dict):
+        return {
+            "label": "Server-side evidence integrity",
+            "passed": False,
+            "detail": "The full candidate evidence ledger is missing, so this packet cannot be approved.",
+        }
+    validation = validate_patches(patches, candidate)
+    intact = bool(patches) and len(validation["safe_patches"]) == len(patches)
+    return {
+        "label": "Server-side evidence integrity",
+        "passed": intact,
+        "detail": "Every export revision still maps to a verified candidate evidence ID." if intact else "One or more revisions are missing verified evidence links, so release is blocked.",
+    }
+
+
+def refresh_export_readiness(run: RunStatus) -> dict[str, Any]:
+    """Recompute QA from the packet; never trust an old client-visible flag."""
+    try:
+        readiness = export_readiness(run.result)
+    except Exception as exc:
+        readiness = {
+            "passed": False,
+            "checks": [{"label": "Document generation", "passed": False, "detail": f"QA could not render this packet: {str(exc)[:160]}"}],
+            "extracted_characters": 0,
+            "verified_bullets": 0,
+        }
+    integrity = packet_integrity_check(run.result)
+    readiness["checks"].append(integrity)
+    readiness["passed"] = bool(readiness.get("passed") and integrity["passed"])
+    run.result["export_readiness"] = readiness
+    return readiness
+
+
+@app.post("/api/runs")
+async def create_run(payload: RunCreate) -> dict[str, Any]:
+    job = JOBS.get(payload.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    candidate = candidate_as_dict(payload.candidate)
+    if not str(candidate.get("name", "")).strip():
+        raise HTTPException(status_code=422, detail="Add your name before creating an application packet.")
+    if not candidate.get("evidence"):
+        raise HTTPException(
+            status_code=422,
+            detail="Add or refresh at least one source-linked resume statement before starting a rehearsal. HireSwarm will not create an application packet from an empty evidence ledger.",
+        )
+    if not any(item.get("status", "verified") == "verified" for item in candidate["evidence"]):
+        raise HTTPException(status_code=422, detail="Confirm at least one verified source statement before starting a rehearsal.")
+    run_id = f"run-{uuid.uuid4().hex[:10]}"
+    run = RunStatus(id=run_id, status="queued", selected_job_id=job["id"], mode=payload.mode)
+    RUNS[run_id] = run
+    asyncio.create_task(execute_mission(run, copy.deepcopy(job), candidate, payload.mode))
+    return {"run_id": run_id, "status": run.status}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str) -> RunStatus:
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.get("/api/runs/{run_id}/events")
+async def stream_run_events(run_id: str):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def generator():
+        index = 0
+        while True:
+            active = RUNS.get(run_id)
+            if not active:
+                break
+            while index < len(active.events):
+                payload = active.events[index].model_dump()
+                index += 1
+                yield f"data: {json.dumps(payload)}\n\n"
+            if active.status in {"needs_evidence", "awaiting_approval", "approved", "failed", "completed"} and index >= len(active.events):
+                yield f"event: done\ndata: {json.dumps({'status': active.status})}\n\n"
+                break
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(generator(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+
+
+@app.post("/api/runs/{run_id}/approve")
+async def approve_run(run_id: str) -> dict[str, Any]:
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail="Run is not ready for approval")
+    readiness = refresh_export_readiness(run)
+    if not readiness.get("passed"):
+        raise HTTPException(status_code=409, detail="Document QA has not passed, so this packet cannot be approved or exported.")
+    run.status = "approved"
+    event(run, "approved", "Application packet approved", "Document export is unlocked. The official application link remains user-controlled.", "HITL Release Custodian")
+    return {"ok": True, "status": run.status, "result": run.result}
+
+
+@app.get("/api/runs/{run_id}/export-readiness")
+async def get_export_readiness(run_id: str) -> dict[str, Any]:
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not run.result:
+        raise HTTPException(status_code=409, detail="Finish the evidence rehearsal before checking export readiness.")
+    return refresh_export_readiness(run)
+
+
+@app.get("/api/runs/{run_id}/export/{format}")
+async def export_application_packet(run_id: str, format: str):
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != "approved":
+        raise HTTPException(status_code=409, detail="Applicant approval is required before any export.")
+    if not refresh_export_readiness(run).get("passed"):
+        raise HTTPException(status_code=409, detail="Document QA no longer passes; return to review before exporting.")
+    if format == "docx":
+        content = build_docx(run.result)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = "HireSwarm_Approved_Application.docx"
+    elif format == "pdf":
+        content = build_pdf(run.result)
+        media_type = "application/pdf"
+        filename = "HireSwarm_Approved_Application.pdf"
+    else:
+        raise HTTPException(status_code=404, detail="Use docx or pdf for an ATS-conscious application export.")
+    return StreamingResponse(BytesIO(content), media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})

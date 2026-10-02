@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# Local browser-audit artifacts (kept out of GitHub and deploy builds)
+frontend/audit-*
+
+# OS
+.DS_Store
+
+# Generated TypeScript state
+frontend/tsconfig.tsbuildinfo

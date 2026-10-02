@@ -1,7 +1,7 @@
 {
-  "name": "HireSwarm — Evidence-Locked Career Workspace",
+  "name": "HireSwarm — Stronger applications from real experience",
   "short_name": "HireSwarm",
-  "description": "Applicant-controlled, evidence-linked career preparation workspace.",
+  "description": "Prepare evidence-backed job applications, with your approval before export.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#081521",

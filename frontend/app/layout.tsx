@@ -5,8 +5,8 @@ import "./premium.css";
 import "./usability-fix.css";
 
 export const metadata: Metadata = {
-  title: "HireSwarm | Evidence-Locked Career Workspace",
-  description: "Applicant-controlled, evidence-linked career preparation workspace.",
+  title: "HireSwarm | Stronger applications from real experience",
+  description: "Evidence-backed job application preparation, with your approval before export.",
   manifest: "/manifest.json",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.ico" },
   robots: { index: true, follow: true },

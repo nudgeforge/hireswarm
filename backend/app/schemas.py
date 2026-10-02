@@ -14,10 +14,10 @@ class Evidence(BaseModel):
 
 
 class CandidateInput(BaseModel):
-    name: str = "Ayesha Khan"
-    headline: str = "Full-Stack Developer | Python, FastAPI, React"
+    name: str = "Hussain Ahmed"
+    headline: str = "Full-Stack Developer · Python · FastAPI · React · PostgreSQL"
     location: str = "Rawalpindi, Pakistan"
-    preferences: list[str] = Field(default_factory=lambda: ["Remote", "Backend"])
+    preferences: list[str] = Field(default_factory=lambda: ["Remote", "Full-stack", "Backend"])
     resume_text: str = ""
     evidence: list[Evidence] = Field(default_factory=list)
 

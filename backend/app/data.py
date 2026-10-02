@@ -9,12 +9,12 @@ from __future__ import annotations
 import re
 
 DEMO_CANDIDATE = {
-    "name": "Ayesha Khan",
-    "headline": "Full-Stack Developer | Python, FastAPI, React",
+    "name": "Hussain Ahmed",
+    "headline": "Full-Stack Developer · Python · FastAPI · React · PostgreSQL",
     "location": "Rawalpindi, Pakistan",
-    "preferences": ["Remote", "Backend", "AI-enabled products"],
-    "resume_text": """AYESHA KHAN
-Full-Stack Developer | Python, FastAPI, React
+    "preferences": ["Remote", "Full-stack", "Backend products"],
+    "resume_text": """HUSSAIN AHMED
+Full-Stack Developer · Python · FastAPI · React · PostgreSQL
 
 EXPERIENCE
 Junior Software Developer — Campus Innovation Lab | 2024–2026

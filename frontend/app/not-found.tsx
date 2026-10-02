@@ -12,7 +12,7 @@ export default function NotFound() {
           <Link href="/workspace">Return to workspace <span>→</span></Link>
           <Link className="not-found-secondary" href="/applications">View applications</Link>
         </div>
-        <small>Applicant-controlled · Evidence-first · No automatic applications</small>
+        <small>You approve everything · Source-linked work examples · No automatic applications</small>
       </section>
     </main>
   );

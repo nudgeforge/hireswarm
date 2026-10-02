@@ -51,6 +51,13 @@ class RealWorkflowTests(unittest.TestCase):
             "cover_letter": build_cover_letter(job, candidate, match),
         }
 
+    def test_demo_candidate_identity_and_schema_default_are_hussain(self):
+        self.assertEqual(DEMO_CANDIDATE["name"], "Hussain Ahmed")
+        self.assertEqual(DEMO_CANDIDATE["headline"], "Full-Stack Developer · Python · FastAPI · React · PostgreSQL")
+        self.assertEqual(DEMO_CANDIDATE["location"], "Rawalpindi, Pakistan")
+        self.assertEqual(CandidateInput().name, "Hussain Ahmed")
+        self.assertEqual(CandidateInput().headline, "Full-Stack Developer · Python · FastAPI · React · PostgreSQL")
+
     def test_public_board_urls_extract_only_the_public_board_identifier(self):
         self.assertEqual(greenhouse_token("https://boards.greenhouse.io/stripe/jobs/123"), "stripe")
         self.assertEqual(greenhouse_token("stripe"), "stripe")
@@ -614,12 +621,12 @@ Reduced manual reporting time by 40 percent with a React dashboard.
         pdf = build_pdf(result)
         self.assertTrue(pdf.startswith(b"%PDF"))
         extracted = " ".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
-        self.assertIn("Ayesha Khan", extracted)
+        self.assertIn("Hussain Ahmed", extracted)
         self.assertIn("TARGETED EXPERIENCE", extracted)
 
         docx = build_docx(result)
         document = Document(BytesIO(docx))
-        self.assertIn("Ayesha Khan", "\n".join(paragraph.text for paragraph in document.paragraphs))
+        self.assertIn("Hussain Ahmed", "\n".join(paragraph.text for paragraph in document.paragraphs))
 
         readiness = export_readiness(result)
         self.assertTrue(readiness["passed"])

@@ -218,7 +218,7 @@ async def root() -> Response | dict[str, str]:
 async def healthz() -> dict[str, Any]:
     return {
         "ok": True,
-        "service": "HireSwarm Evidence Lab",
+        "service": "HireSwarm application workspace",
         "mode": "deterministic evidence engine",
         # This reports usable provider-backed CrewAI, not merely an opt-in flag.
         "optional_crewai": crewai_available(),
@@ -256,7 +256,7 @@ def _candidate_from_text(text: str, filename: str) -> CandidateInput:
     first = clean_lines[0] if clean_lines else "Imported applicant"
     # Resumes conventionally start with a name; avoid treating a long section heading as one.
     name = first[:90] if 1 < len(first.split()) <= 6 and len(first) < 70 else "Imported applicant"
-    headline = clean_lines[1][:140] if len(clean_lines) > 1 and len(clean_lines[1]) < 160 else "Applicant-controlled profile"
+    headline = clean_lines[1][:140] if len(clean_lines) > 1 and len(clean_lines[1]) < 160 else "Your profile"
     evidence = extract_evidence_from_resume(text)
     if not evidence:
         raise ValueError("Readable text was found, but no reviewable experience statements could be safely extracted. You can paste and edit the text instead.")
@@ -264,7 +264,7 @@ def _candidate_from_text(text: str, filename: str) -> CandidateInput:
         name=name,
         headline=headline,
         location="Location not specified",
-        preferences=["Applicant-controlled", "Imported CV"],
+        preferences=["Imported CV"],
         resume_text=text[:50000],
         evidence=evidence,
     )
@@ -311,7 +311,7 @@ async def list_jobs(mode: str = "demo", query: str = "") -> dict[str, Any]:
         return {
             "mode": "demo_fixture",
             "jobs": [normalized_job(job) for job in JOBS.values() if job.get("origin") == "demo_fixture"],
-            "provenance": {"label": "Practice fixtures", "retrieved_at": None, "cache_state": "fixture"},
+            "provenance": {"label": "Demo roles", "retrieved_at": None, "cache_state": "fixture"},
         }
     return await public_jobs(query=required_live_query(query))
 
@@ -521,16 +521,16 @@ async def execute_mission(run: RunStatus, job: dict[str, Any], candidate: dict[s
                 narrative = await asyncio.to_thread(run_optional_crew, job, candidate)
                 event(run, "crewai_enrichment", "CrewAI relay returned", "Provider narrative is available; deterministic evidence rules remain authoritative.", "Mission Conductor", {"provider": narrative.get("provider", "configured provider")})
             except Exception as exc:
-                event(run, "crewai_fallback", "CrewAI relay unavailable", f"Falling back to the local Evidence Lab: {str(exc)[:120]}", "Mission Conductor")
+                event(run, "crewai_fallback", "Guided review unavailable", f"Continuing with standard evidence checks: {str(exc)[:120]}", "Application guide")
         else:
-            event(run, "crewai_fallback", "CrewAI credentials not enabled", "Continuing with the fully functional local Evidence Lab. Add a free Groq or Gemini key to enable provider-backed narration.", "Mission Conductor")
+            event(run, "crewai_fallback", "Guided review is not enabled", "Continuing with standard evidence checks. Your work examples and approval safeguards stay the same.", "Application guide")
     await execute_evidence_lab(run, job, candidate)
 
 
 async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any]) -> None:
     try:
         run.status = "running"
-        event(run, "run_started", "Mission started", "Evidence Lab is mapping candidate claims against the target role.", "Mission Conductor")
+        event(run, "run_started", "Fit check started", "Matching your work examples with this job’s requirements.", "Application guide")
         await asyncio.sleep(0.55)
 
         event(run, "agent_active", "Market Scout scanning", "Extracting must-have skills and checking source-linked evidence.", "Market Scout", {"phase": "mapping"})

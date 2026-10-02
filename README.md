@@ -1,8 +1,8 @@
 # HireSwarm
 
-> **An applicant-controlled, evidence-locked application workspace.**
+> **A clear workspace for building a stronger job application from real experience.**
 >
-> HireSwarm lets a candidate start with a published job listing and their own CV, build a source-linked proof ledger, rehearse the hard questions, make truthful role-specific edits, and export only after a human approval gate.
+> Start with your CV, choose a role, understand your fit requirement by requirement, build a supportable application story, practice likely interview questions, and export only after your approval.
 
 ![Stack](https://img.shields.io/badge/stack-Next.js%20%2B%20FastAPI%20%2B%20CrewAI-27789b)
 ![Cost](https://img.shields.io/badge/default%20cost-%240-398f70)
@@ -12,10 +12,10 @@
 
 Job trackers, keyword matchers, and generic AI resume writers already exist. HireSwarm is deliberately narrower and more defensible:
 
-- **A claim compiler, not a keyword stuffer.** Every suggested resume line and cover-letter draft retains the evidence IDs from the applicant's CV.
-- **An interview consistency check, not a static score.** The Candidate Twin answers only from the same evidence that backs a document edit; the HR Interrogator exposes direct, adjacent, and missing proof.
-- **Source-aware by design.** A role is visibly marked as a practice fixture, user-pasted brief, or live public listing, with its official link preserved.
-- **Applicant-controlled.** The app reads public jobs and creates an approved document; it never logs into a job board, autofills a third-party form, or submits an application.
+- **Supported claims, not keyword stuffing.** Every suggested CV point and cover-letter point stays linked to a real CV line or work example.
+- **A fit map, not a rejection score.** The four specialist roles distinguish direct evidence, related experience, and missing proof rather than turning every keyword into a match.
+- **Clear source labels.** A job is visibly marked as a Demo role, Pasted by you, or Public job listing, with its official link preserved.
+- **You approve everything.** The app reads public jobs and creates a reviewable document; it never logs into a job board, autofills a third-party form, or submits an application.
 - **Honest about ATS readiness.** It performs a real text-extraction round trip on its own single-column PDF export. It does **not** pretend to know an employer's proprietary ATS ranking algorithm.
 
 Read the research, category gap, and source-policy rationale in [`docs/RESEARCH_AND_PRODUCT_DECISIONS.md`](docs/RESEARCH_AND_PRODUCT_DECISIONS.md).
@@ -35,23 +35,23 @@ Read the research, category gap, and source-policy rationale in [`docs/RESEARCH_
 
 | Label in the UI | Meaning |
 |---|---|
-| **Practice fixture** | Deterministic offline sample data for a no-key demo. Never described as a real opening. |
-| **Live public listing** | A current result fetched from a published public feed or official public board. The role preserves source, link, and retrieval/cache state. |
-| **Pasted by you** | Candidate-provided role text. The candidate chooses whether to include a source URL. |
+| **Demo role** | Deterministic sample data for a safe no-key demo. It is never described as a real opening. |
+| **Public job listing** | A current result fetched from a published public feed or official public board. The job preserves source, link, and retrieval/cache state. |
+| **Pasted by you** | Job text you added yourself. You choose whether to include a source URL. |
 
-The default workspace begins on labeled practice data so judges can demo without network/API keys. It is never presented as an application target: its primary action directs the candidate to **Find live roles** or **Paste role** before preparing a real packet.
+The default workspace begins with Hussain Ahmed’s labeled demo profile so anyone can explore safely without a network/API key. Nothing is submitted, and the clear next actions are **Start with my CV**, **Find public roles**, or **Paste a job listing**.
 
 ### Exact real-data test — no account or API key needed
 
-1. Open the app and select **How it works** in the header if you want the in-product checklist.
-2. Click **Your profile** (the avatar) or **01 Import your CV**. Upload a text-based `.pdf`, `.docx`, or `.txt` CV — ideally a copy with contact details you are comfortable using. The source file is parsed in memory for the session; it is not retained.
-3. Click **Refresh evidence**, then confirm the evidence count and source-backed snippets look right. If you edit the pasted CV text, refresh before proceeding.
-4. Choose one role route:
-   - **Paste role**: copy a public job description you trust, add its official `https://` link if available, then select **Add to shortlist**. The UI will call it **Pasted by you**.
-   - **Find live roles**: search a public Remotive/Arbeitnow feed, or connect one public Greenhouse/Lever board. The UI preserves whether results are fresh or cached and retains their source link.
-5. Select the non-practice target and click **Run a focused rehearsal**. Watch the four roles identify direct proof, adjacent experience, and gaps. A missing skill should remain a gap rather than become a claim.
-6. In **Tailor**, review every suggested line and its evidence IDs. In **Review**, check the document QA note.
-7. Select **I've reviewed this packet** only if the material is truthful. That explicit action unlocks `.docx` and PDF downloads. Open the official listing and apply yourself; HireSwarm never submits an application.
+1. Open the app and select **Guide** in the header if you want the in-product checklist.
+2. Click **Start with my CV** or **Profile**. Upload a text-based `.pdf`, `.docx`, or `.txt` CV, or paste CV text — ideally a copy with contact details you are comfortable using. The source file is parsed in memory for the session; it is not retained.
+3. Click **Refresh work examples**, then confirm the source-backed snippets look right. If you edit pasted CV text, refresh before proceeding.
+4. Choose one job route:
+   - **Paste a job listing**: copy a public job description you trust, add its official `https://` link if available, then select **Add to my applications**. The UI will call it **Pasted by you**.
+   - **Find public roles**: search a public Remotive/Arbeitnow feed, or connect one public Greenhouse/Lever board. The UI preserves whether results are fresh or cached and retains their source link.
+5. Choose your current job and click **Check my fit**. The requirement map shows strong evidence, related experience, and honest gaps. A missing skill remains a gap rather than becoming a claim.
+6. In **Build your story**, review each source-linked CV point and why it matters. In **Practice**, prepare answers from the same work examples.
+7. In **Review & export**, select **Approve application packet** only if the material is truthful. That explicit action unlocks `.docx` and PDF downloads. Open the official listing and apply yourself; HireSwarm never submits an application.
 
 **Safe testing:** use a non-sensitive CV version and a copied public listing. Do not include passwords, government-ID details, bank information, or confidential employer material.
 
@@ -81,14 +81,14 @@ Open `http://localhost:3000`.
 
 ## A credible 90-second live demo
 
-1. Open **Find live roles** and either search `Python developer`, or connect a public Greenhouse/Lever board such as a public board URL.
-2. Point out the source badge and the official listing link. This is read-only discovery, not scraping or auto-apply.
-3. Open **Your profile** and import a real text-based CV. Show the in-memory/no-retention note and evidence count.
-4. Select a live role and click **Run a focused rehearsal**.
-5. Let the event stream show Market Scout, Candidate Twin, HR Interrogator, and Resume Surgeon. Pause on an unsupported/adjacent requirement: HireSwarm keeps the gap visible rather than manufacturing experience.
-6. In **Tailor**, open an edit and show its evidence IDs.
-7. In **Review**, call out the real PDF text round-trip check, approve the packet, and download `.docx` or `.pdf`.
-8. Finish by opening the official listing yourself. HireSwarm intentionally leaves the application submission under the candidate's control.
+1. Start with **Try a demo** to see Hussain Ahmed’s clearly labeled sample profile, or use **Find public roles** to search `Python developer` or connect a public Greenhouse/Lever board.
+2. Point out the job source badge and official listing link. This is read-only discovery, not scraping or auto-apply.
+3. Select **Start with my CV** and import a real text-based CV. Show the in-memory/no-retention note and work-example count.
+4. Choose a public job and click **Check my fit**.
+5. Let the event stream show Market Scout, Candidate Twin, HR Interrogator, and Resume Surgeon. Pause on a related or missing requirement: HireSwarm keeps the gap visible rather than manufacturing experience.
+6. In **Build your story**, open a proof card and show its source link, why it matters, and the places it can be used.
+7. In **Review & export**, call out the real PDF text round-trip check, approve the packet, and download `.docx` or `.pdf`.
+8. Finish by opening the official listing yourself. HireSwarm intentionally leaves submission in your hands.
 
 ## API surface
 
@@ -96,7 +96,7 @@ Open `http://localhost:3000`.
 |---|---|
 | `POST /api/candidate/upload` | In-memory `.pdf` / `.docx` / `.txt` CV import and evidence extraction. |
 | `POST /api/candidate/normalize` | Refresh evidence from edited resume text. |
-| `GET /api/jobs?mode=demo` | Clearly labeled no-key practice fixtures. |
+| `GET /api/jobs?mode=demo` | Clearly labeled no-key demo roles. |
 | `GET /api/jobs/live?query=python&source=all` | User-triggered published feed discovery (`all`, `remotive`, or `arbeitnow`). |
 | `POST /api/jobs/public-board` | Read a public Greenhouse or Lever board: `{"source":"greenhouse","board":"boards.greenhouse.io/company"}`. |
 | `POST /api/jobs/manual` | Store a candidate-pasted job description for the session. |
@@ -108,8 +108,8 @@ Open `http://localhost:3000`.
 
 | Mode | Cost | What runs |
 |---|---:|---|
-| **Evidence Lab (default)** | $0 | Deterministic matching, evidence validation, typed SSE events, interview state, source-linked patches, document QA, and approval gate. No API key is required. |
-| **CrewAI + Groq/Gemini** | $0 within free-tier quotas | Optional provider-backed narration for the four CrewAI roles. The Python validator remains authoritative. |
+| **Standard evidence checks (default)** | $0 | Deterministic matching, source validation, typed SSE events, interview state, source-linked application points, document QA, and approval gate. No API key is required. |
+| **Guided AI review (CrewAI + Groq/Gemini)** | $0 within free-tier quotas | Optional provider-backed narration for the four CrewAI roles. The Python validator remains authoritative. |
 | **Local fallback** | $0 | Use Ollama with an open model if cloud free-tier inference is unavailable. |
 
 The default path is not a prerecorded animation: the browser starts an actual FastAPI mission, the backend calculates direct coverage, emits structured events, validates each patch, renders a PDF for extraction QA, and waits for approval.
@@ -185,7 +185,7 @@ The MVP deliberately works without a database. For persistence, run `supabase/sc
 
 - No hiring decision or employer-side candidate ranking.
 - No protected-attribute inference.
-- No claim without evidence IDs.
+- No claim without linked work examples.
 - No hidden source substitution: a failed live connector is visibly failed, not made to look live.
 - No auto-apply, browser automation, or employer credentials.
 - Human approval is required before export; final application submission is always the applicant's action.

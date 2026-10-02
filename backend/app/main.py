@@ -88,7 +88,16 @@ JOBS: dict[str, dict[str, Any]] = {job["id"]: copy.deepcopy(job) for job in DEMO
 REMOTIVE_CACHE: list[dict[str, Any]] = []
 REMOTIVE_CACHE_AT: datetime | None = None
 REMOTIVE_CACHE_ERROR: str | None = None
+# Remotive publishes one broad feed, so it is safely cached and filtered locally.
 LIVE_CACHE_TTL = timedelta(hours=6)
+# Other public calls are requested only after an applicant asks for them. Keep
+# short, bounded server-side caches so repeated searches/boards do not wait on
+# external providers or flood their free APIs.
+ARBEITNOW_QUERY_CACHE_TTL = timedelta(minutes=10)
+PUBLIC_BOARD_CACHE_TTL = timedelta(minutes=20)
+ARBEITNOW_QUERY_CACHE: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
+PUBLIC_BOARD_CACHE: dict[tuple[str, str], tuple[datetime, list[dict[str, Any]]]] = {}
+MAX_PUBLIC_CACHE_ENTRIES = 32
 
 
 def now() -> str:
@@ -108,7 +117,7 @@ def candidate_as_dict(candidate: CandidateInput | None) -> dict[str, Any]:
 
 
 def normalized_job(job: dict[str, Any]) -> dict[str, Any]:
-    """Return a compact, display-safe job record without mutating server state."""
+    """Return a full, display-safe job record only when a user opens a role."""
     response = dict(job)
     response.pop("interview_questions", None)
     origin = response.get("origin")
@@ -117,7 +126,38 @@ def normalized_job(job: dict[str, Any]) -> dict[str, Any]:
     description = str(response.get("description", "")).strip()
     if len(description) > CLIENT_DESCRIPTION_LIMIT:
         response["description"] = f"{description[:CLIENT_DESCRIPTION_LIMIT - 1].rstrip()}…"
+    response["detail_loaded"] = True
     return response
+
+
+def job_summary(job: dict[str, Any]) -> dict[str, Any]:
+    """Return the tiny list payload used by user-requested live discovery.
+
+    Descriptions are intentionally excluded. The browser asks for the full
+    record only after the applicant explicitly reviews a role, keeping public
+    discovery fast on slower connections and avoiding a feed's large body in
+    every role card.
+    """
+    origin = job.get("origin")
+    skills = list(dict.fromkeys([
+        *[str(skill) for skill in job.get("must_have", []) if str(skill).strip()],
+        *[str(skill) for skill in job.get("preferred", []) if str(skill).strip()],
+    ]))[:8]
+    return {
+        "id": str(job.get("id", "")),
+        "origin": origin,
+        "source": str(job.get("source", "Published public listing")),
+        "title": str(job.get("title", "Untitled role")),
+        "company": str(job.get("company", "Company not disclosed")),
+        "location": str(job.get("location", "Location not specified")),
+        "type": str(job.get("type", "Not specified")),
+        "url": str(job.get("url", "")),
+        "skills": skills,
+        "posted": str(job.get("posted", "not disclosed")),
+        "retrieved_at": job.get("retrieved_at"),
+        "cache_state": job.get("cache_state", "fixture" if origin == "demo_fixture" else "candidate" if origin == "user_pasted" else "fresh"),
+        "detail_loaded": False,
+    }
 
 
 def checked_application_url(value: str) -> str:
@@ -302,44 +342,74 @@ async def _remotive_results(query: str, limit: int = PUBLIC_RESULT_LIMIT) -> tup
     return filtered[:limit], cache_state, errors
 
 
+def _prune_timed_cache(cache: dict[Any, tuple[datetime, list[dict[str, Any]]]], ttl: timedelta) -> None:
+    """Bound volatile public-source caches even under many distinct searches."""
+    current = datetime.now(timezone.utc)
+    for key, (cached_at, _value) in list(cache.items()):
+        if current - cached_at >= ttl:
+            cache.pop(key, None)
+    while len(cache) > MAX_PUBLIC_CACHE_ENTRIES:
+        oldest = min(cache, key=lambda item: cache[item][0])
+        cache.pop(oldest, None)
+
+
+async def _arbeitnow_results(query: str, limit: int = PUBLIC_RESULT_LIMIT) -> tuple[list[dict[str, Any]], str, list[str]]:
+    cache_key = query.casefold().strip()
+    _prune_timed_cache(ARBEITNOW_QUERY_CACHE, ARBEITNOW_QUERY_CACHE_TTL)
+    cached = ARBEITNOW_QUERY_CACHE.get(cache_key)
+    if cached:
+        jobs = [dict(job, cache_state="cached") for job in cached[1]]
+        return jobs[:limit], "cached", []
+    try:
+        jobs = await fetch_arbeitnow(query=query, limit=limit)
+        retrieved_at = now()
+        stored = [dict(job, retrieved_at=retrieved_at, cache_state="fresh") for job in jobs]
+        ARBEITNOW_QUERY_CACHE[cache_key] = (datetime.now(timezone.utc), stored)
+        _prune_timed_cache(ARBEITNOW_QUERY_CACHE, ARBEITNOW_QUERY_CACHE_TTL)
+        return stored[:limit], "fresh", []
+    except Exception:
+        return [], "unavailable", ["Arbeitnow is temporarily unavailable. You can still paste a role or connect a public company board."]
+
+
 async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
-    """Fetch user-requested public roles with provider-correct caching/provenance."""
+    """Fetch user-requested public roles concurrently and return list summaries."""
+    providers = []
+    if source in {"all", "remotive"}:
+        providers.append(_remotive_results(query))
+    if source in {"all", "arbeitnow"}:
+        providers.append(_arbeitnow_results(query))
+
+    # Isolate each provider: a timeout or unexpected source adapter failure
+    # must not discard results that the other public feed already returned.
+    results = await asyncio.gather(*providers, return_exceptions=True) if providers else []
     jobs: list[dict[str, Any]] = []
     errors: list[str] = []
     cache_states: list[str] = []
-
-    if source in {"all", "remotive"}:
-        remotive, state, remotive_errors = await _remotive_results(query)
-        jobs.extend(remotive)
-        cache_states.append(state)
-        errors.extend(remotive_errors)
-
-    if source in {"all", "arbeitnow"}:
-        try:
-            arbeitnow = await fetch_arbeitnow(query=query, limit=PUBLIC_RESULT_LIMIT)
-            retrieved_at = now()
-            for job in arbeitnow:
-                job["retrieved_at"] = retrieved_at
-                job["cache_state"] = "fresh"
-            jobs.extend(arbeitnow)
-            cache_states.append("fresh")
-        except Exception:
-            errors.append("Arbeitnow is temporarily unavailable. You can still paste a role or connect a public ATS board.")
+    for result in results:
+        if isinstance(result, Exception):
             cache_states.append("unavailable")
+            errors.append("One public job source is temporarily unavailable. You can still use the available listings or paste a role.")
+            continue
+        provider_jobs, state, provider_errors = result
+        jobs.extend(provider_jobs)
+        cache_states.append(state)
+        errors.extend(provider_errors)
 
     deduped = list({job["id"]: job for job in jobs}.values())[:PUBLIC_RESULT_LIMIT]
+    # Keep the complete source record in volatile server memory for the explicit
+    # detail request and evidence run. Only job_summary leaves this endpoint.
     JOBS.update({job["id"]: job for job in deduped})
     available_states = {state for state in cache_states if state != "unavailable"}
     cache_state = "mixed" if len(available_states) > 1 else next(iter(available_states), "unavailable")
     retrieved_values = [job.get("retrieved_at") for job in deduped if job.get("retrieved_at")]
     return {
         "mode": "live_public" if deduped else "live_unavailable",
-        "jobs": [normalized_job(job) for job in deduped],
+        "jobs": [job_summary(job) for job in deduped],
         "provenance": {
             "label": "Published public job feeds",
             "retrieved_at": max(retrieved_values) if retrieved_values else None,
             "cache_state": cache_state,
-            "polling_policy": "Remotive results are cached for six hours; Arbeitnow is fetched only when you request it. HireSwarm never submits an application.",
+            "polling_policy": "Remotive is cached for six hours. Arbeitnow query results are cached for ten minutes. HireSwarm never submits an application.",
         },
         "source_errors": errors,
     }
@@ -352,26 +422,55 @@ async def list_live_jobs(query: str = "", source: str = "all") -> dict[str, Any]
     return await public_jobs(query=required_live_query(query), source=source)
 
 
+@app.get("/api/jobs/{job_id}")
+async def get_job_detail(job_id: str) -> dict[str, Any]:
+    """Return full role text only after an applicant explicitly opens a role."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="That role is no longer available in this session. Search again or paste the role description.",
+        )
+    return normalized_job(job)
+
+
+async def _public_board_results(source: str, board: str) -> tuple[list[dict[str, Any]], str]:
+    cache_key = (source, board.casefold().strip())
+    _prune_timed_cache(PUBLIC_BOARD_CACHE, PUBLIC_BOARD_CACHE_TTL)
+    cached = PUBLIC_BOARD_CACHE.get(cache_key)
+    if cached:
+        return [dict(job, cache_state="cached") for job in cached[1]], "cached"
+    jobs = await (fetch_greenhouse(board, limit=PUBLIC_RESULT_LIMIT) if source == "greenhouse" else fetch_lever(board, limit=PUBLIC_RESULT_LIMIT))
+    retrieved_at = now()
+    stored = [dict(job, retrieved_at=retrieved_at, cache_state="fresh") for job in jobs]
+    PUBLIC_BOARD_CACHE[cache_key] = (datetime.now(timezone.utc), stored)
+    _prune_timed_cache(PUBLIC_BOARD_CACHE, PUBLIC_BOARD_CACHE_TTL)
+    return stored, "fresh"
+
+
 @app.post("/api/jobs/public-board")
 async def import_public_board(payload: PublicBoardInput) -> dict[str, Any]:
-    """Read a user-selected public Greenhouse/Lever board without employer credentials."""
+    """Read a user-selected public board only after request, with a bounded cache."""
     try:
-        jobs = await (fetch_greenhouse(payload.board, limit=PUBLIC_RESULT_LIMIT) if payload.source == "greenhouse" else fetch_lever(payload.board, limit=PUBLIC_RESULT_LIMIT))
+        jobs, cache_state = await _public_board_results(payload.source, payload.board)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="That public board could not be reached. Check the public board URL or paste the job description instead.") from exc
     if not jobs:
         raise HTTPException(status_code=404, detail="No published roles were found on that public board.")
-    retrieved_at = now()
-    for job in jobs:
-        job["retrieved_at"] = retrieved_at
-        job["cache_state"] = "fresh"
     JOBS.update({job["id"]: job for job in jobs})
+    retrieved_values = [job.get("retrieved_at") for job in jobs if job.get("retrieved_at")]
     return {
         "mode": "live_public_board",
-        "jobs": [normalized_job(job) for job in jobs],
-        "provenance": {"label": f"Official {payload.source.title()} public board", "retrieved_at": retrieved_at, "cache_state": "fresh", "board": payload.board},
+        "jobs": [job_summary(job) for job in jobs],
+        "provenance": {
+            "label": f"Official {payload.source.title()} public board",
+            "retrieved_at": max(retrieved_values) if retrieved_values else None,
+            "cache_state": cache_state,
+            "board": payload.board,
+            "polling_policy": "This public board is cached for twenty minutes after you request it. HireSwarm only reads listings.",
+        },
     }
 
 

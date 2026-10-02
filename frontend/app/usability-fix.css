@@ -547,3 +547,66 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   line-height: 1.45;
 }
 .modal-demo-note b { color: #ffe6b9; }
+
+/* Performance-pass loading states: lightweight CSS only; no spinner library. */
+.inline-skeleton {
+  display: block;
+  min-height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(111, 154, 184, .14), rgba(172, 224, 239, .24), rgba(111, 154, 184, .14));
+  background-size: 220% 100%;
+  animation: hireswarm-skeleton-shift 1.35s ease-in-out infinite;
+}
+.inline-skeleton.short { width: 38%; }
+.inline-skeleton.medium { width: 66%; }
+.initial-workspace-skeleton {
+  display: grid;
+  gap: 18px;
+  min-height: 330px;
+  margin-top: 17px;
+  padding: clamp(20px, 3vw, 31px);
+  border: 1px solid rgba(145, 211, 242, .14);
+  border-radius: 19px;
+  background: linear-gradient(145deg, rgba(19, 53, 78, .52), rgba(8, 30, 50, .68));
+}
+.initial-skeleton-heading { display: grid; gap: 12px; max-width: 420px; }
+.initial-skeleton-heading .inline-skeleton:last-child { min-height: 24px; width: 78%; }
+.initial-skeleton-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(220px, .8fr); gap: 15px; }
+.initial-skeleton-grid article { display: grid; min-height: 155px; gap: 14px; padding: 20px; border: 1px solid rgba(145, 211, 242, .1); border-radius: 14px; background: rgba(5, 25, 43, .27); }
+.initial-workspace-skeleton > p { margin: 0; color: #9bb7c9; font-size: 11px; }
+.deferred-panel-loading { display: grid; min-height: 225px; align-content: center; gap: 14px; padding: 24px 6px; color: #cde4ef; }
+.deferred-panel-loading > b { font-size: 15px; }
+.deferred-panel-loading .inline-skeleton { max-width: 500px; }
+.deferred-panel-loading .inline-skeleton.short { width: 43%; }
+.deferred-dialog-loading { min-height: 180px; display: grid; align-content: center; gap: 12px; }
+.deferred-dialog-loading .inline-skeleton { width: 70%; }
+.role-detail-gate { min-height: 250px; }
+.role-detail-gate h3 { margin: 5px 0 10px; color: #ecf8ff; font-size: clamp(19px, 2.2vw, 25px); line-height: 1.14; }
+.role-detail-gate .match-story > .kicker { margin-bottom: 6px; }
+.compact-loading { align-content: center; }
+.skeleton-row { pointer-events: none; }
+.skeleton-row > span {
+  color: transparent;
+  background: linear-gradient(90deg, rgba(111, 154, 184, .14), rgba(172, 224, 239, .24), rgba(111, 154, 184, .14));
+  background-size: 220% 100%;
+  animation: hireswarm-skeleton-shift 1.35s ease-in-out infinite;
+}
+.skeleton-row b, .skeleton-row p {
+  display: block;
+  height: 10px;
+  margin: 5px 0;
+  border-radius: 99px;
+  background: linear-gradient(90deg, rgba(111, 154, 184, .14), rgba(172, 224, 239, .24), rgba(111, 154, 184, .14));
+  background-size: 220% 100%;
+  animation: hireswarm-skeleton-shift 1.35s ease-in-out infinite;
+}
+.skeleton-row b { width: 62%; }
+.skeleton-row p { width: 86%; }
+@keyframes hireswarm-skeleton-shift { 0% { background-position: 100% 0; } 100% { background-position: -120% 0; } }
+@media (max-width: 620px) {
+  .initial-workspace-skeleton { min-height: 260px; padding: 17px; }
+  .initial-skeleton-grid { grid-template-columns: 1fr; }
+  .initial-skeleton-grid article { min-height: 92px; }
+  .role-detail-gate { min-height: 0; }
+  .role-detail-gate .requirements-list { min-height: 165px; }
+}

@@ -162,6 +162,79 @@ class RealWorkflowTests(unittest.TestCase):
             main_module.REMOTIVE_CACHE_AT = None
             main_module.REMOTIVE_CACHE_ERROR = None
 
+    def test_arbeitnow_query_cache_and_public_board_cache_are_bounded_and_summary_only(self):
+        arbeitnow_job = {
+            "id": "arbeitnow-cache-python", "origin": "public_cache", "source": "Arbeitnow", "title": "Python Developer",
+            "company": "Example", "location": "Remote", "type": "Full time", "description": "Build Python services.",
+            "must_have": ["Python"], "preferred": ["Docker"], "url": "https://careers.example.com/python",
+        }
+        board_job = {**arbeitnow_job, "id": "greenhouse-cache-python", "source": "Greenhouse"}
+        main_module.ARBEITNOW_QUERY_CACHE.clear()
+        main_module.PUBLIC_BOARD_CACHE.clear()
+        try:
+            with patch.object(main_module, "fetch_arbeitnow", new=AsyncMock(return_value=[arbeitnow_job])) as arbeitnow_fetch, \
+                 patch.object(main_module, "fetch_greenhouse", new=AsyncMock(return_value=[board_job])) as greenhouse_fetch:
+                first = asyncio.run(main_module.public_jobs(query="python", source="arbeitnow"))
+                second = asyncio.run(main_module.public_jobs(query="python", source="arbeitnow"))
+                self.assertEqual(arbeitnow_fetch.await_count, 1)
+                self.assertEqual(first["provenance"]["cache_state"], "fresh")
+                self.assertEqual(second["provenance"]["cache_state"], "cached")
+                self.assertNotIn("description", second["jobs"][0])
+
+                client = TestClient(app)
+                board_first = client.post("/api/jobs/public-board", json={"source": "greenhouse", "board": "example"})
+                board_second = client.post("/api/jobs/public-board", json={"source": "greenhouse", "board": "example"})
+                self.assertEqual(board_first.status_code, 200, board_first.text)
+                self.assertEqual(board_second.status_code, 200, board_second.text)
+                self.assertEqual(greenhouse_fetch.await_count, 1)
+                self.assertEqual(board_second.json()["provenance"]["cache_state"], "cached")
+                self.assertNotIn("description", board_second.json()["jobs"][0])
+        finally:
+            main_module.ARBEITNOW_QUERY_CACHE.clear()
+            main_module.PUBLIC_BOARD_CACHE.clear()
+            main_module.JOBS.pop(arbeitnow_job["id"], None)
+            main_module.JOBS.pop(board_job["id"], None)
+
+    def test_independent_public_feeds_start_in_parallel_with_failure_isolation(self):
+        remotive_job = {"id": "parallel-remotive", "origin": "public_cache", "source": "Remotive", "title": "Python role", "company": "Remote Co", "description": "Build Python.", "must_have": ["Python"], "preferred": [], "url": "https://example.com/remotive"}
+        arbeitnow_job = {"id": "parallel-arbeitnow", "origin": "public_cache", "source": "Arbeitnow", "title": "Python role", "company": "Remote Co", "description": "Build Python.", "must_have": ["Python"], "preferred": [], "url": "https://example.com/arbeitnow"}
+        main_module.REMOTIVE_CACHE.clear()
+        main_module.REMOTIVE_CACHE_AT = None
+        main_module.ARBEITNOW_QUERY_CACHE.clear()
+        started: set[str] = set()
+        release = asyncio.Event()
+
+        async def delayed_remotive(**_kwargs):
+            started.add("remotive")
+            await release.wait()
+            return [remotive_job]
+
+        async def delayed_arbeitnow(**_kwargs):
+            started.add("arbeitnow")
+            await release.wait()
+            return [arbeitnow_job]
+
+        async def exercise():
+            with patch.object(main_module, "fetch_remotive", new=AsyncMock(side_effect=delayed_remotive)), \
+                 patch.object(main_module, "fetch_arbeitnow", new=AsyncMock(side_effect=delayed_arbeitnow)):
+                task = asyncio.create_task(main_module.public_jobs(query="python", source="all"))
+                await asyncio.sleep(0.03)
+                both_started = started == {"remotive", "arbeitnow"}
+                release.set()
+                payload = await task
+                return both_started, payload
+
+        try:
+            both_started, payload = asyncio.run(exercise())
+            self.assertTrue(both_started, "both public feeds should start before either provider resolves")
+            self.assertEqual({job["id"] for job in payload["jobs"]}, {"parallel-remotive", "parallel-arbeitnow"})
+        finally:
+            main_module.REMOTIVE_CACHE.clear()
+            main_module.REMOTIVE_CACHE_AT = None
+            main_module.ARBEITNOW_QUERY_CACHE.clear()
+            main_module.JOBS.pop(remotive_job["id"], None)
+            main_module.JOBS.pop(arbeitnow_job["id"], None)
+
     def test_live_queries_require_two_characters_on_both_route_contracts(self):
         client = TestClient(app)
         for path in ("/api/jobs/live?query=x", "/api/jobs?mode=live&query=%20"):
@@ -199,7 +272,7 @@ class RealWorkflowTests(unittest.TestCase):
             finally:
                 main_module.STATIC_DIR = previous_static_dir
 
-    def test_public_job_response_is_capped_and_long_description_stays_server_side(self):
+    def test_public_job_list_is_capped_and_long_description_stays_server_side_until_detail(self):
         raw_description = "x" * 9_000
         jobs = [{
             "id": f"public-{index}", "origin": "public_cache", "source": "Test source", "title": f"Role {index}",
@@ -209,16 +282,23 @@ class RealWorkflowTests(unittest.TestCase):
         main_module.REMOTIVE_CACHE.clear()
         main_module.REMOTIVE_CACHE_AT = None
         main_module.REMOTIVE_CACHE_ERROR = None
+        main_module.ARBEITNOW_QUERY_CACHE.clear()
         try:
             with patch.object(main_module, "fetch_remotive", new=AsyncMock(return_value=jobs)), patch.object(main_module, "fetch_arbeitnow", new=AsyncMock(return_value=[])):
                 payload = asyncio.run(main_module.public_jobs(query="role", source="all"))
             self.assertEqual(len(payload["jobs"]), main_module.PUBLIC_RESULT_LIMIT)
-            self.assertTrue(all(len(item["description"]) <= main_module.CLIENT_DESCRIPTION_LIMIT for item in payload["jobs"]))
+            self.assertTrue(all("description" not in item and "must_have" not in item and "preferred" not in item for item in payload["jobs"]))
+            self.assertTrue(all(item["detail_loaded"] is False and item["skills"] == ["Python"] for item in payload["jobs"]))
             self.assertEqual(main_module.JOBS["public-0"]["description"], raw_description)
+            detail = TestClient(app).get("/api/jobs/public-0")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertTrue(detail.json()["detail_loaded"])
+            self.assertEqual(len(detail.json()["description"]), main_module.CLIENT_DESCRIPTION_LIMIT)
         finally:
             main_module.REMOTIVE_CACHE.clear()
             main_module.REMOTIVE_CACHE_AT = None
             main_module.REMOTIVE_CACHE_ERROR = None
+            main_module.ARBEITNOW_QUERY_CACHE.clear()
             for job in jobs:
                 main_module.JOBS.pop(job["id"], None)
 

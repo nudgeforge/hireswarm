@@ -21,13 +21,15 @@ type ExportCheck = { label: string; passed: boolean; detail: string };
 type ExportReadiness = { passed: boolean; checks: ExportCheck[]; extracted_characters: number; verified_bullets: number };
 type SourceResponse = { mode: string; jobs: Job[]; provenance?: { label?: string; retrieved_at?: string | null; cache_state?: string; polling_policy?: string; board?: string }; source_errors?: string[] };
 type ImportInfo = { filename: string; format: string; characters_read: number; evidence_count: number; retention: string };
+type RunCheckpoint = { id: string; status: string; selected_job_id: string; mode: "evidence_lab" | "crewai"; event_count: number; job?: Job | null };
 
 // Undefined keeps local Next.js rewrite behaviour. An explicitly empty value is
 // used by the Railway all-in-one image so API requests stay on the same origin.
 const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE;
 const API = configuredApiBase === undefined ? "/backend" : configuredApiBase.replace(/\/+$/, "");
+const RUN_STORAGE_KEY = "hireswarm.activeRunId";
 type ServiceStatus = "checking" | "online" | "offline";
-type ServiceHealth = { ok?: boolean; service?: string; mode?: string };
+type ServiceHealth = { ok?: boolean; service?: string; mode?: string; optional_crewai?: boolean };
 
 function detailFrom(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
@@ -130,6 +132,12 @@ const sourceDetail = (job?: Job) => {
   return `Source: ${job.source} · ${job.cache_state === "cached" ? "cached" : "retrieved"} ${retrievalLabel(job.retrieved_at)}`;
 };
 
+function apiRunMode(engine: RunMode): "evidence_lab" | "crewai" {
+  // The API deliberately supports only these two modes. Keep this explicit so
+  // no presentation label can leak into a backend request.
+  return engine === "crewai" ? "crewai" : "evidence_lab";
+}
+
 export default function Home() {
   const pathname = usePathname();
   const router = useRouter();
@@ -166,7 +174,13 @@ export default function Home() {
   const [isImporting, setIsImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
+  const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null);
+  const [isApproving, setIsApproving] = useState(false);
+  const [isExporting, setIsExporting] = useState<"docx" | "pdf" | null>(null);
   const streamRef = useRef<EventSource | null>(null);
+  const runLockRef = useRef(false);
+  const approvalLockRef = useRef(false);
+  const exportLockRef = useRef(false);
   const shortlistRef = useRef<HTMLElement | null>(null);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
 
@@ -180,6 +194,8 @@ export default function Home() {
   const proofItem = candidate.evidence.find((item) => item.metric) || candidate.evidence[0];
   const candidateFirstName = candidate.name.trim().split(/\s+/)[0] || "there";
   const serviceOnline = serviceStatus === "online";
+  const crewaiAvailable = Boolean(serviceHealth?.optional_crewai);
+  const runIsActive = runState === "running";
   const serviceCopy = serviceStatus === "online" ? "Service connected" : serviceStatus === "checking" ? "Checking connection" : "Service unavailable";
 
   async function checkService(showSuccess = false) {
@@ -187,6 +203,7 @@ export default function Home() {
     try {
       const health = await requestJson<ServiceHealth>(`${API}/healthz`);
       if (!health.ok) throw new Error("The workspace service did not confirm that it is ready.");
+      setServiceHealth(health);
       setServiceStatus("online");
       if (showSuccess) setNotice("Workspace service is connected. You can import a CV, add a role, or start a rehearsal.");
       return true;
@@ -212,6 +229,7 @@ export default function Home() {
       }
       if (candidateLoaded && candidateResult.value.evidence.length) setCandidate(candidateResult.value);
       if (healthResult.status === "fulfilled" && healthResult.value.ok && (jobsLoaded || candidateLoaded)) {
+        setServiceHealth(healthResult.value);
         setServiceStatus("online");
       } else {
         setServiceStatus("offline");
@@ -226,13 +244,52 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    async function restoreSavedRun() {
+      const savedRunId = window.sessionStorage.getItem(RUN_STORAGE_KEY);
+      if (!savedRunId) return;
+      // Lock mutable actions immediately while we verify the server checkpoint.
+      runLockRef.current = true;
+      setRunState("running");
+      setActiveAgent("Restoring your saved rehearsal");
+      try {
+        const checkpoint = await requestJson<RunCheckpoint>(`${API}/api/runs/${encodeURIComponent(savedRunId)}`);
+        if (cancelled) return;
+        const restoredState: RunState = checkpoint.status === "queued" || checkpoint.status === "running"
+          ? "running"
+          : checkpoint.status === "needs_evidence" || checkpoint.status === "awaiting_approval" || checkpoint.status === "approved" || checkpoint.status === "failed"
+            ? checkpoint.status
+            : "failed";
+        setRunId(checkpoint.id);
+        setRunState(restoredState);
+        runLockRef.current = restoredState === "running";
+        setActiveAgent(restoredState === "running" ? "Resuming your evidence rehearsal" : "Restoring your saved review");
+        if (checkpoint.job) {
+          const restoredJob = checkpoint.job;
+          setJobs((previous) => [restoredJob, ...previous.filter((job) => job.id !== restoredJob.id)]);
+        }
+        if (checkpoint.selected_job_id) setSelectedJobId(checkpoint.selected_job_id);
+        attachRunStream(checkpoint.id, true);
+      } catch {
+        if (cancelled) return;
+        window.sessionStorage.removeItem(RUN_STORAGE_KEY);
+        runLockRef.current = false;
+        setRunState("failed");
+        setNotice("The saved rehearsal is no longer available after a service restart. Nothing was approved or exported.");
+      }
+    }
+    void restoreSavedRun();
+    return () => { cancelled = true; streamRef.current?.close(); };
+  }, []);
+
+  useEffect(() => {
     const route = routeState(pathname);
     setActiveNavigation(route.section);
     setView(route.view);
   }, [pathname]);
 
   function resetRun(nextView: WorkspaceView = "match") {
-    streamRef.current?.close(); setRunId(null); setRunState("idle"); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
+    streamRef.current?.close(); runLockRef.current = false; window.sessionStorage.removeItem(RUN_STORAGE_KEY); setRunId(null); setRunState("idle"); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
   }
 
   function scrollToShortlist() {
@@ -253,15 +310,25 @@ export default function Home() {
   }
 
   function chooseEngine(mode: RunMode) {
+    if (mode === "crewai" && !crewaiAvailable) {
+      setShowEngineMenu(false);
+      setRunMode("evidence_lab");
+      setNotice("CrewAI is not configured on this workspace. Evidence Lab will run instead, with the same evidence and approval safeguards.");
+      return;
+    }
     setRunMode(mode);
     setShowEngineMenu(false);
     setNotice(mode === "crewai"
-      ? "CrewAI narration is selected. If no free provider key is configured, HireSwarm will clearly fall back to the Evidence Lab."
+      ? "CrewAI is available for this run. Evidence Lab still governs claim checks and export approval."
       : "Evidence Lab is selected. Its deterministic evidence checks control every claim and export.");
   }
 
   function explainServiceUnavailable() {
     setNotice("The live workspace API is unavailable. Demo fixtures are visible only for orientation; imports, live role discovery, rehearsals, approval, and exports are paused until the service reconnects.");
+  }
+
+  function explainRunActive() {
+    setNotice("A rehearsal is still active. Wait for its evidence review before changing the target, profile evidence, or export state.");
   }
 
   function startFromHero() {
@@ -276,12 +343,14 @@ export default function Home() {
 
   function openBlankJobForm() {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     setManualTitle(""); setManualCompany(""); setManualLocation(""); setManualUrl(""); setManualDescription("");
     setShowJobForm(true);
   }
 
   function adaptSelectedJob() {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     if (!selectedJob) return openBlankJobForm();
     setManualTitle(selectedJob.title); setManualCompany(selectedJob.company); setManualLocation(selectedJob.location);
     // Example links used by practice fixtures must not be relabeled as an official listing.
@@ -293,7 +362,9 @@ export default function Home() {
     if (!url) return;
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("unsupported protocol");
+      if (parsed.protocol !== "https:") throw new Error("unsupported protocol");
+      const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+      if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || /^(?:127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1)$/.test(host)) throw new Error("local host");
       window.open(parsed.toString(), "_blank", "noopener,noreferrer");
     } catch { setNotice("This listing does not contain a safe official web link."); }
   }
@@ -316,10 +387,10 @@ export default function Home() {
     if (event.type === "interview_verdict" || event.type === "gap_detected") { const round = Number(event.payload.round || 1); updateTurn(round, { requirement: String(event.payload.requirement || "Role requirement"), status: String(event.payload.status || ""), verdict: String(event.payload.verdict || event.message || ""), evidence_ids: Array.isArray(event.payload.evidence_ids) ? event.payload.evidence_ids.map(String) : [] }); }
     if (event.type === "resume_patch") { setPatches(Array.isArray(event.payload.patches) ? event.payload.patches as Patch[] : []); setCoverageAfter(Number(event.payload.coverage_after || 0)); setCoverLetter(String(event.payload.cover_letter || "")); setCoverLetterEvidenceIds(Array.isArray(event.payload.cover_letter_evidence_ids) ? event.payload.cover_letter_evidence_ids.map(String) : []); setView("tailor"); }
     if (event.type === "export_readiness") setExportReadiness(event.payload as unknown as ExportReadiness);
-    if (event.type === "evidence_needed") { setRunState("needs_evidence"); setActiveAgent("More direct evidence is needed"); setNotice(event.message || "Add source-linked evidence or choose a better-matched role before exporting."); setView("match"); }
-    if (event.type === "approval_required") { setRunState("awaiting_approval"); setActiveNavigation("documents"); setActiveAgent("Your review is needed"); setView("review"); }
-    if (event.type === "approved") { setRunState("approved"); setActiveNavigation("documents"); setActiveAgent("Application packet approved"); setView("review"); }
-    if (event.type === "run_failed") { setRunState("failed"); setNotice(event.message || "The rehearsal could not finish. Please try again."); }
+    if (event.type === "evidence_needed") { runLockRef.current = false; setRunState("needs_evidence"); setActiveAgent("More direct evidence is needed"); setNotice(event.message || "Add source-linked evidence or choose a better-matched role before exporting."); setView("match"); }
+    if (event.type === "approval_required") { runLockRef.current = false; setRunState("awaiting_approval"); if (pathname === "/" || pathname === "/workspace") setActiveNavigation("documents"); setActiveAgent("Your review is needed"); setView("review"); }
+    if (event.type === "approved") { runLockRef.current = false; setRunState("approved"); if (pathname === "/" || pathname === "/workspace") setActiveNavigation("documents"); setActiveAgent("Application packet approved"); setView("review"); }
+    if (event.type === "run_failed") { runLockRef.current = false; setRunState("failed"); setNotice(event.message || "The rehearsal could not finish. Please try again."); }
   }
 
   function reportActionError(error: unknown, fallback: string) {
@@ -328,10 +399,45 @@ export default function Home() {
     setNotice(message);
   }
 
+  function attachRunStream(id: string, restoring = false) {
+    streamRef.current?.close();
+    const source = new EventSource(`${API}/api/runs/${id}/events`);
+    streamRef.current = source;
+    let reachedTerminalEvent = false;
+    source.onmessage = (message) => {
+      try { receiveEvent(JSON.parse(message.data) as SwarmEvent); }
+      catch { setNotice("One rehearsal update could not be read. The rest of the run is still continuing."); }
+    };
+    source.addEventListener("done", () => {
+      reachedTerminalEvent = true;
+      runLockRef.current = false;
+      window.setTimeout(() => source.close(), 120);
+    });
+    source.onerror = () => {
+      source.close();
+      if (!reachedTerminalEvent) {
+        runLockRef.current = false;
+        setRunState("failed");
+        if (restoring) {
+          window.sessionStorage.removeItem(RUN_STORAGE_KEY);
+          setNotice("The saved rehearsal could not be resumed. Its local run record is no longer available, and no export was made.");
+        } else {
+          setServiceStatus("offline");
+          setNotice("The rehearsal stream disconnected before it finished. Nothing was exported — retry when the workspace connection is back.");
+        }
+      }
+    };
+  }
+
   async function startRehearsal() {
     if (!serviceOnline) return explainServiceUnavailable();
-    if (!selectedJob) return;
+    if (!selectedJob || runIsActive || runLockRef.current) return;
+    if (runMode === "crewai" && !crewaiAvailable) {
+      setRunMode("evidence_lab");
+      setNotice("CrewAI is unavailable on this workspace, so this rehearsal will use Evidence Lab.");
+    }
     resetRun("rehearse");
+    runLockRef.current = true;
     setActiveNavigation("practice");
     scrollToWorkspacePanel();
     setRunState("running");
@@ -340,31 +446,15 @@ export default function Home() {
       const data = await requestJson<{ run_id?: string; detail?: string }>(`${API}/api/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: selectedJob.id, candidate, mode: runMode }),
+        body: JSON.stringify({ job_id: selectedJob.id, candidate, mode: apiRunMode(runMode === "crewai" && !crewaiAvailable ? "evidence_lab" : runMode) }),
       });
       if (!data.run_id) throw new Error(data.detail || "The workspace could not start this rehearsal.");
       setServiceStatus("online");
       setRunId(data.run_id);
-      const source = new EventSource(`${API}/api/runs/${data.run_id}/events`);
-      streamRef.current = source;
-      let reachedTerminalEvent = false;
-      source.onmessage = (message) => {
-        try { receiveEvent(JSON.parse(message.data) as SwarmEvent); }
-        catch { setNotice("One rehearsal update could not be read. The rest of the run is still continuing."); }
-      };
-      source.addEventListener("done", () => {
-        reachedTerminalEvent = true;
-        window.setTimeout(() => source.close(), 120);
-      });
-      source.onerror = () => {
-        source.close();
-        if (!reachedTerminalEvent) {
-          setRunState("failed");
-          setServiceStatus("offline");
-          setNotice("The rehearsal stream disconnected before it finished. Nothing was exported — retry when the workspace connection is back.");
-        }
-      };
+      window.sessionStorage.setItem(RUN_STORAGE_KEY, data.run_id);
+      attachRunStream(data.run_id);
     } catch (error) {
+      runLockRef.current = false;
       setRunState("failed");
       reportActionError(error, "The rehearsal could not start.");
     }
@@ -372,19 +462,24 @@ export default function Home() {
 
   async function approvePacket() {
     if (!serviceOnline) return explainServiceUnavailable();
-    if (!runId) return;
+    if (!runId || runIsActive || runState !== "awaiting_approval" || approvalLockRef.current) return;
+    approvalLockRef.current = true;
+    setIsApproving(true);
     try {
       await requestJson<Record<string, unknown>>(`${API}/api/runs/${runId}/approve`, { method: "POST" });
       setServiceStatus("online");
       setRunState("approved");
       setActiveAgent("Application packet approved");
-      setEvents((previous) => [{ type: "approved", agent: "You", title: "You approved the application packet", message: "Export is now unlocked. Submission remains in your control.", payload: {} }, ...previous]);
+      setEvents((previous) => previous.some((event) => event.type === "approved") ? previous : [{ type: "approved", agent: "You", title: "You approved the application packet", message: "Export is now unlocked. Submission remains in your control.", payload: {} }, ...previous]);
     } catch (error) { reportActionError(error, "Approval could not be saved."); }
+    finally { approvalLockRef.current = false; setIsApproving(false); }
   }
 
   async function exportPacket(format: "docx" | "pdf") {
     if (!serviceOnline) return explainServiceUnavailable();
-    if (!runId) return;
+    if (!runId || runIsActive || runState !== "approved" || exportLockRef.current) return;
+    exportLockRef.current = true;
+    setIsExporting(format);
     try {
       const response = await requestFile(`${API}/api/runs/${runId}/export/${format}`);
       const content = await response.blob();
@@ -399,9 +494,11 @@ export default function Home() {
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     } catch (error) { reportActionError(error, "The approved packet could not be exported."); }
+    finally { exportLockRef.current = false; setIsExporting(null); }
   }
 
   function mergeJobs(incoming: Job[], chooseFirst = true) {
+    if (runLockRef.current) { explainRunActive(); return; }
     if (!incoming.length) return;
     setJobs((previous) => {
       const next = [...incoming, ...previous.filter((job) => !incoming.some((fresh) => fresh.id === job.id))];
@@ -416,9 +513,19 @@ export default function Home() {
   async function addManualJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     if (manualTitle.trim().length < 2 || manualCompany.trim().length < 2 || manualDescription.trim().length < 20) {
       setNotice("Add a role title, company, and at least a short role description before creating a target.");
       return;
+    }
+    if (manualUrl.trim()) {
+      try {
+        const parsed = new URL(manualUrl.trim());
+        if (parsed.protocol !== "https:") throw new Error("not HTTPS");
+      } catch {
+        setNotice("Use a public HTTPS link for the official listing, or leave the optional link blank. HireSwarm never opens private or local URLs.");
+        return;
+      }
     }
     try {
       const job = await requestJson<Job>(`${API}/api/jobs/manual`, {
@@ -436,19 +543,27 @@ export default function Home() {
 
   async function discoverPublicRoles(query: string, source: "all" | "remotive" | "arbeitnow") {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
+    const cleanQuery = query.trim();
+    if (cleanQuery.length < 2) {
+      setNotice("Enter at least 2 characters for a live-role search, for example “Python” or “product designer”.");
+      return;
+    }
     try {
-      const data = await requestJson<SourceResponse>(`${API}/api/jobs/live?query=${encodeURIComponent(query)}&source=${source}`);
+      const data = await requestJson<SourceResponse>(`${API}/api/jobs/live?query=${encodeURIComponent(cleanQuery)}&source=${source}`);
       setServiceStatus("online");
       if (!data.jobs.length) throw new Error(data.source_errors?.[0] || "No current public roles matched. No fixture was substituted.");
-      mergeJobs(data.jobs);
+      const boundedJobs = data.jobs.slice(0, 12);
+      mergeJobs(boundedJobs);
       setShowLiveFinder(false);
       const cacheNote = data.provenance?.cache_state === "cached" ? "cached public feed" : "fresh public feed";
-      setNotice(`Added ${data.jobs.length} roles from a ${cacheNote}. Each listing keeps its direct source link.`);
+      setNotice(`Added ${boundedJobs.length} roles from a ${cacheNote}. Each listing keeps its direct source link.`);
     } catch (error) { reportActionError(error, "Live roles could not be loaded. You can paste a role instead."); }
   }
 
   async function connectPublicBoard(source: "greenhouse" | "lever", board: string) {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     try {
       const data = await requestJson<SourceResponse>(`${API}/api/jobs/public-board`, {
         method: "POST",
@@ -457,14 +572,16 @@ export default function Home() {
       });
       setServiceStatus("online");
       if (!data.jobs.length) throw new Error("That public board did not return any available roles. You can paste one listing instead.");
-      mergeJobs(data.jobs);
+      const boundedJobs = data.jobs.slice(0, 12);
+      mergeJobs(boundedJobs);
       setShowLiveFinder(false);
-      setNotice(`Added ${data.jobs.length} published role${data.jobs.length === 1 ? "" : "s"} from the official ${source === "greenhouse" ? "Greenhouse" : "Lever"} board. HireSwarm only reads listings; you apply on the official site.`);
+      setNotice(`Added ${boundedJobs.length} published role${boundedJobs.length === 1 ? "" : "s"} from the official ${source === "greenhouse" ? "Greenhouse" : "Lever"} board. HireSwarm only reads listings; you apply on the official site.`);
     } catch (error) { reportActionError(error, "The public board could not be read."); }
   }
 
   async function importResume(file: File) {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     setIsImporting(true);
     try {
       const form = new FormData();
@@ -481,6 +598,7 @@ export default function Home() {
 
   async function analyzeResume() {
     if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
     setIsAnalyzing(true);
     try {
       const data = await requestJson<Candidate | { detail?: string }>(`${API}/api/candidate/normalize`, {
@@ -537,12 +655,13 @@ export default function Home() {
             {showEngineMenu && <div className="engine-menu" role="menu" aria-label="Choose workflow engine">
               <p className="menu-overline">WORKFLOW ENGINE</p>
               <button role="menuitem" className={cx(runMode === "evidence_lab" && "selected")} onClick={() => chooseEngine("evidence_lab")}><span className="engine-menu-symbol">✓</span><span><b>Evidence Lab</b><small>Deterministic proof checks · default</small></span>{runMode === "evidence_lab" && <i>Selected</i>}</button>
-              <button role="menuitem" className={cx(runMode === "crewai" && "selected")} onClick={() => chooseEngine("crewai")}><span className="engine-menu-symbol">✦</span><span><b>CrewAI relay</b><small>Optional free-provider narration</small></span>{runMode === "crewai" && <i>Selected</i>}</button>
+              <button role="menuitem" className={cx(runMode === "crewai" && "selected")} onClick={() => chooseEngine("crewai")} disabled={!crewaiAvailable} aria-disabled={!crewaiAvailable}><span className="engine-menu-symbol">✦</span><span><b>CrewAI relay</b><small>{crewaiAvailable ? "Free-provider narration available" : "Unavailable here · Evidence Lab will run"}</small></span>{runMode === "crewai" && crewaiAvailable && <i>Selected</i>}</button>
+              {!crewaiAvailable && <p className="engine-unavailable" role="note">CrewAI is not configured on this deployment. No provider-backed agent run will be claimed; use Evidence Lab.</p>}
             </div>}
           </div>
           <button className="command-action guide-action" onClick={() => setShowGuide(true)} aria-label="Open how HireSwarm works guide"><span className="command-icon">?</span><span className="mobile-command-label">Guide</span><span className="command-copy"><b>Guide</b><small>See the path</small></span></button>
-          <button className="command-action find-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-label="Find public roles" aria-disabled={!serviceOnline}><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>Find roles</b><small>{serviceOnline ? "Public sources" : "API paused"}</small></span></button>
-          <button className="command-action paste-action" onClick={openBlankJobForm} aria-label="Paste a job listing"><span className="command-icon">+</span><span className="mobile-command-label">Paste</span><span className="command-copy"><b>Paste role</b><small>Add your listing</small></span></button>
+          <button className="command-action find-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-label="Find public roles" disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>Find roles</b><small>{serviceOnline ? "Public sources" : "API paused"}</small></span></button>
+          <button className="command-action paste-action" onClick={openBlankJobForm} aria-label="Paste a job listing" disabled={!serviceOnline || runIsActive}><span className="command-icon">+</span><span className="mobile-command-label">Paste</span><span className="command-copy"><b>Paste role</b><small>Add your listing</small></span></button>
           <button className="profile-button command-profile" onClick={() => setShowIntake(true)} aria-label="Open your profile"><span>{initials(candidate.name)}</span><i>Profile</i><small className="mobile-command-label">You</small></button>
         </div>
       </header>
@@ -571,10 +690,10 @@ export default function Home() {
         <section className="launchpad-card" aria-labelledby="launchpad-title">
           <div className="launchpad-intro"><p className="section-kicker">START HERE</p><h2 id="launchpad-title">Bring one honest input.<br />We’ll make it usable.</h2><p>{selectedIsPractice ? "This workspace is showing safe sample data. Use any path below to move into your own application." : "Your selected target is ready. Check the source, then start the evidence rehearsal when it feels right."}</p></div>
           <div className="launchpad-paths">
-            <button className="launch-path cv-path" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}><span className="path-top"><i>01</i><em>CV</em></span><b>{serviceOnline ? "Import your CV" : "CV import paused"}</b><small>{serviceOnline ? `${candidate.evidence.length} evidence notes ready` : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
-            <button className="launch-path source-path" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}><span className="path-top"><i>02</i><em>↗</em></span><b>Find public roles</b><small>{serviceOnline ? "Remotive, Arbeitnow, or ATS" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
-            <button className="launch-path paste-path" onClick={openBlankJobForm} aria-disabled={!serviceOnline}><span className="path-top"><i>03</i><em>+</em></span><b>Paste a listing</b><small>{serviceOnline ? "Keep the official link with it" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
-            <button className="launch-path practice-path" onClick={() => void startRehearsal()} disabled={!serviceOnline}><span className="path-top"><i>04</i><em>◎</em></span><b>Explore safely</b><small>{serviceOnline ? "Try the practice flow first" : "Rehearsal is paused"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path cv-path" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}><span className="path-top"><i>01</i><em>CV</em></span><b>{serviceOnline ? "Import your CV" : "CV import paused"}</b><small>{serviceOnline ? `${candidate.evidence.length} evidence notes ready` : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path source-path" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}><span className="path-top"><i>02</i><em>↗</em></span><b>Find public roles</b><small>{serviceOnline ? "Remotive, Arbeitnow, or ATS" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path paste-path" onClick={openBlankJobForm} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}><span className="path-top"><i>03</i><em>+</em></span><b>Paste a listing</b><small>{serviceOnline ? "Keep the official link with it" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path practice-path" onClick={() => void startRehearsal()} disabled={!serviceOnline || runIsActive}><span className="path-top"><i>04</i><em>◎</em></span><b>{runIsActive ? "Rehearsal in progress" : "Explore safely"}</b><small>{runIsActive ? "Wait for the active run to finish" : serviceOnline ? "Try the practice flow first" : "Rehearsal is paused"}</small><span className="path-arrow">→</span></button>
           </div>
         </section>
         <section className="progress-nav" aria-label="Application workflow">{views.map((item, index) => { const done = (item.id === "match" && Boolean(market)) || (item.id === "rehearse" && turns.length > 0) || (item.id === "tailor" && patches.length > 0) || (item.id === "review" && ["awaiting_approval", "approved"].includes(runState)); return <button key={item.id} className={cx("progress-step", view === item.id && "active", done && "done")} onClick={() => { setView(item.id); setActiveNavigation(item.id === "match" ? "workspace" : item.id === "rehearse" ? "practice" : "documents"); scrollToWorkspacePanel(); }}><span>{done ? "✓" : item.number}</span><div><b>{item.label}</b><small>{item.hint}</small></div>{index < views.length - 1 && <i />}</button>; })}</section>
@@ -583,10 +702,10 @@ export default function Home() {
           <section ref={workspacePanelRef} className="workspace-panel"><div className="panel-topline"><div><p className="kicker">{views.find((item) => item.id === view)?.number} / {views.find((item) => item.id === view)?.label?.toUpperCase()}</p><h2>{panelHeading(view, runState)}</h2></div><div className="live-context"><span className={cx("tiny-status", runState === "running" && "is-live")} />{activeAgent}</div></div>
             {view === "match" && <MatchPanel selectedJob={selectedJob} market={market} onStart={() => void startRehearsal()} runState={runState} canRun={serviceOnline} />}
             {view === "rehearse" && <RehearsalPanel turns={turns} currentTurn={currentTurn} runState={runState} onStart={() => void startRehearsal()} canRun={serviceOnline} />}
-            {view === "tailor" && <TailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} canRun={serviceOnline} />}
-            {view === "review" && <ReviewPanel runState={runState} patches={patches} gaps={market?.gaps || []} readiness={exportReadiness} selectedJob={selectedJob} onApprove={() => void approvePacket()} onExport={exportPacket} onOpenOfficial={openOfficialListing} serviceOnline={serviceOnline} />}
+            {view === "tailor" && <TailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} canRun={serviceOnline} runState={runState} />}
+            {view === "review" && <ReviewPanel runState={runState} patches={patches} gaps={market?.gaps || []} readiness={exportReadiness} selectedJob={selectedJob} onApprove={() => void approvePacket()} onExport={exportPacket} onOpenOfficial={openOfficialListing} serviceOnline={serviceOnline} isApproving={isApproving} isExporting={isExporting} />}
           </section>
-          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR SHORTLIST</p><h2>Worth a closer look</h2></div><div className="shortlist-actions"><button className="text-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}>Find live roles</button><button className="text-action" onClick={openBlankJobForm} aria-disabled={!serviceOnline}>Paste another role</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} onClick={() => { setSelectedJobId(job.id); setActiveNavigation("applications"); resetRun("match"); }}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{job.must_have.slice(0, 3).join(" · ")}</small></div><i>↗</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
+          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR SHORTLIST</p><h2>Worth a closer look</h2></div><div className="shortlist-actions"><button className="text-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}>Find live roles</button><button className="text-action" onClick={openBlankJobForm} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}>Paste another role</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} disabled={runIsActive} aria-label={runIsActive ? "Role switching is locked while the rehearsal runs" : undefined} onClick={() => { setSelectedJobId(job.id); setActiveNavigation("applications"); resetRun("match"); }}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{job.must_have.slice(0, 3).join(" · ")}</small></div><i>↗</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
         </section>
         <aside className="insight-column"><section className="evidence-card"><div className="section-heading"><div><p className="kicker">EVIDENCE VAULT</p><h2>What you can prove</h2></div><span className="count-pill">{candidate.evidence.length}</span></div><div className="evidence-meter"><div className="meter-number"><b>{market ? coverage : "—"}</b><span>{market ? "%" : "ready"}</span></div><div className="meter-copy"><b>Coverage, not confidence.</b><p>{market ? "Direct proof is separated from adjacent experience." : "Run the brief to see role-specific evidence coverage."}</p></div></div><EvidenceGroup label="Direct strengths" tone="mint" items={market ? market.verified_strengths.map((item) => item.skill) : evidencePreviewSkills} /><EvidenceGroup label="Adjacent experience" tone="amber" items={market ? market.adjacent_strengths.map((item) => item.skill) : []} /><EvidenceGroup label="Keep visible" tone="coral" items={market ? market.gaps.map((item) => item.skill) : []} /></section>
           <section className="proof-card"><p className="kicker">TODAY&apos;S PROOF</p><blockquote>“{proofItem?.source_text || "Import or write a literal work statement to begin."}”</blockquote><div><span>Evidence {proofItem?.evidence_id || "—"}</span><b>{proofItem ? "Verified source" : "Needs source"}</b></div></section>
@@ -594,7 +713,7 @@ export default function Home() {
         </aside></div>
       </div>
     </div>
-    {showIntake && <CandidateModal candidate={candidate} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} serviceOnline={serviceOnline} />}
+    {showIntake && <CandidateModal candidate={candidate} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} serviceOnline={serviceOnline} runIsActive={runIsActive} />}
     {showJobForm && <JobModal title={manualTitle} company={manualCompany} location={manualLocation} url={manualUrl} description={manualDescription} onTitle={setManualTitle} onCompany={setManualCompany} onLocation={setManualLocation} onUrl={setManualUrl} onDescription={setManualDescription} onClose={() => setShowJobForm(false)} onSubmit={(event) => void addManualJob(event)} />}
     {showLiveFinder && <LiveRolesModal onClose={() => setShowLiveFinder(false)} onDiscover={discoverPublicRoles} onConnect={connectPublicBoard} />}
     {showGuide && <HowItWorksModal onClose={() => setShowGuide(false)} onOpenProfile={() => { setShowGuide(false); setShowIntake(true); }} onOpenLive={() => { if (!serviceOnline) return explainServiceUnavailable(); setShowGuide(false); setShowLiveFinder(true); }} onOpenManual={() => { setShowGuide(false); openBlankJobForm(); }} />}
@@ -633,27 +752,45 @@ function RehearsalPanel({ turns, currentTurn, runState, onStart, canRun }: { tur
   return <div className="rehearsal-wrap"><div className="interview-status"><div><span className={cx("record-dot", runState === "running" && "recording")} /> {runState === "running" ? "Rehearsal in progress" : "Interview notes"}</div><b>{turns.length}/4 prompts reviewed</b></div><div className="conversation-list">{turns.map((turn) => <article className="conversation-turn" key={turn.round}><div className="turn-marker">{String(turn.round).padStart(2, "0")}</div><div className="turn-content"><div className="question-bubble"><span>HIRING PANEL · {turn.requirement}</span><p>{turn.question || "Preparing the next role-specific question…"}</p></div>{turn.answer && <div className="answer-bubble"><span>YOUR TWIN · <b className={cx("status-word", turn.status?.toLowerCase())}>{turn.status}</b></span><p>{turn.answer}</p>{turn.evidence_ids?.length ? <div className="source-pills">{turn.evidence_ids.map((id) => <i key={id}>{id}</i>)}</div> : null}</div>}{turn.verdict && <div className={cx("verdict", turn.status?.toLowerCase())}>{turn.verdict}</div>}</div></article>)}</div>{runState === "running" && <div className="now-thinking"><span /><p>{currentTurn?.question ? "Checking the answer against the evidence ledger…" : "Preparing the next interview prompt…"}</p></div>}</div>;
 }
 
-function TailorPanel({ patches, coverLetter, coverLetterEvidenceIds, showCoverLetter, onToggleCoverLetter, onStart, canRun }: { patches: Patch[]; coverLetter: string; coverLetterEvidenceIds: string[]; showCoverLetter: boolean; onToggleCoverLetter: () => void; onStart: () => void; canRun: boolean }) {
-  if (!patches.length) return <div className="tailor-empty"><div className="paper-stack"><span /><span /><article><small>YOUR RESUME</small><b>Relevant work, clearly stated.</b><p>The strongest application is specific about what you did — and careful about what you did not do.</p></article></div><div><h3>Your resume will stay yours.</h3><p>Once the rehearsal is complete, HireSwarm suggests small, source-linked changes. You see every original sentence before deciding what to keep.</p><button className="inline-primary" onClick={onStart} disabled={!canRun}>{canRun ? "Run the evidence check" : "Evidence check paused"} <span>→</span></button></div></div>;
+function TailorPanel({ patches, coverLetter, coverLetterEvidenceIds, showCoverLetter, onToggleCoverLetter, onStart, canRun, runState }: { patches: Patch[]; coverLetter: string; coverLetterEvidenceIds: string[]; showCoverLetter: boolean; onToggleCoverLetter: () => void; onStart: () => void; canRun: boolean; runState: RunState }) {
+  if (!patches.length) return <div className="tailor-empty"><div className="paper-stack"><span /><span /><article><small>YOUR RESUME</small><b>Relevant work, clearly stated.</b><p>The strongest application is specific about what you did — and careful about what you did not do.</p></article></div><div><h3>Your resume will stay yours.</h3><p>Once the rehearsal is complete, HireSwarm suggests small, source-linked changes. You see every original sentence before deciding what to keep.</p><button className="inline-primary" onClick={onStart} disabled={!canRun || runState === "running"}>{runState === "running" ? "Evidence check in progress" : canRun ? "Run the evidence check" : "Evidence check paused"} <span>→</span></button></div></div>;
   if (showCoverLetter) return <div className="letter-view"><div className="letter-toolbar"><div><span>APPLICATION NOTE</span><b>Draft cover letter</b></div><button className="text-action" onClick={onToggleCoverLetter}>Back to revisions</button></div>{coverLetterEvidenceIds.length > 0 && <div className="letter-evidence"><span>Bound to evidence</span>{coverLetterEvidenceIds.map((id) => <i key={id}>{id}</i>)}</div>}<pre>{coverLetter}</pre></div>;
   return <div className="revision-wrap"><div className="revision-toolbar"><div><span>{patches.length} suggested changes</span><p>Each revision carries its evidence trail.</p></div><button className="outline-action small" onClick={onToggleCoverLetter} disabled={!coverLetter}>Read cover letter</button></div><div className="revision-list">{patches.map((patch, index) => <article className="revision" key={`${patch.original}-${index}`}><div className="revision-number">{String(index + 1).padStart(2, "0")}</div><div className="revision-body"><div className="revision-section">{patch.section}</div>{patch.proposed.trim() === patch.original.trim() ? <><p className="before source-only">SOURCE SENTENCE</p><p className="after">Keep this exact wording; prioritize it in this section for the target role.</p></> : <><p className="before"><s>{patch.original}</s></p><p className="after">{patch.proposed}</p></>}<div className="revision-meta"><span>Backed by {patch.evidence_ids.map((id) => <i key={id}>{id}</i>)}</span><em>{patch.reason}</em></div></div></article>)}</div></div>;
 }
 
-function ReviewPanel({ runState, patches, gaps, readiness, selectedJob, onApprove, onExport, onOpenOfficial, serviceOnline }: { runState: RunState; patches: Patch[]; gaps: { skill: string; severity: string }[]; readiness: ExportReadiness | null; selectedJob?: Job; onApprove: () => void; onExport: (format: "docx" | "pdf") => void; onOpenOfficial: (url?: string) => void; serviceOnline: boolean }) {
+function ReviewPanel({ runState, patches, gaps, readiness, selectedJob, onApprove, onExport, onOpenOfficial, serviceOnline, isApproving, isExporting }: { runState: RunState; patches: Patch[]; gaps: { skill: string; severity: string }[]; readiness: ExportReadiness | null; selectedJob?: Job; onApprove: () => void; onExport: (format: "docx" | "pdf") => void; onOpenOfficial: (url?: string) => void; serviceOnline: boolean; isApproving: boolean; isExporting: "docx" | "pdf" | null }) {
   const ready = runState === "awaiting_approval" || runState === "approved";
+  const isRunning = runState === "running";
   const extractionPassed = readiness?.checks.find((item) => item.label === "PDF text round-trip")?.passed ?? false;
-  return <div className="review-layout"><div className="review-lead"><div className={cx("review-seal", runState === "approved" && "approved")}>{runState === "approved" ? "✓" : "01"}</div><div><h3>{runState === "approved" ? "You're ready to apply on your terms." : ready ? "A final read is all that's left." : "The application packet will appear here."}</h3><p>{runState === "approved" ? "Your verified revisions and cover letter are ready to take with you. HireSwarm will never submit an application for you." : ready ? "Check the rewritten sentences, acknowledge the gaps that remain, then approve the packet when it sounds like you." : "Complete the rehearsal and tailoring steps to create a document you can review."}</p></div></div><div className="review-checks"><ReviewCheck complete={patches.length > 0} label={`${patches.length || "No"} evidence-linked resume revisions`} /><ReviewCheck complete label={gaps.length ? `${gaps.length} growth area${gaps.length > 1 ? "s" : ""} kept visible` : "No unmet role requirements detected"} /><ReviewCheck complete={Boolean(readiness?.passed && extractionPassed)} label={readiness?.passed ? "One-column export passed a real PDF text check" : "Export readiness will be checked before approval"} /><ReviewCheck complete={runState === "approved"} label={runState === "approved" ? "Your approval has been recorded" : "Your approval is still required"} /></div>{readiness && <div className="readiness-note"><span>{readiness.passed ? "✓" : "!"}</span><p><b>Document QA</b> · {readiness.verified_bullets} verified bullet{readiness.verified_bullets === 1 ? "" : "s"}; {readiness.extracted_characters} characters read back from the generated PDF.</p></div>}<div className="review-actions">{runState === "awaiting_approval" && <button className="approve-action" onClick={onApprove} disabled={!serviceOnline}>{serviceOnline ? "I've reviewed this packet" : "Approval paused"} <span>→</span></button>}{runState === "approved" && <><button className="approve-action export" onClick={() => onExport("docx")} disabled={!serviceOnline}>Download .docx <span>↓</span></button><button className="outline-action" onClick={() => onExport("pdf")} disabled={!serviceOnline}>Printable PDF <span>↓</span></button>{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="outline-action" onClick={() => onOpenOfficial(selectedJob.url)}>Open official listing ↗</button>}</>} {!ready && <span className="locked-action">Complete a rehearsal to unlock review</span>}</div></div>;
+  return <div className="review-layout">
+    <div className="review-lead"><div className={cx("review-seal", runState === "approved" && "approved")}>{runState === "approved" ? "✓" : "01"}</div><div><h3>{runState === "approved" ? "You're ready to apply on your terms." : ready ? "A final read is all that's left." : isRunning ? "The packet is still being prepared." : "The application packet will appear here."}</h3><p>{runState === "approved" ? "Your verified revisions and cover letter are ready to take with you. HireSwarm will never submit an application for you." : ready ? "Check the rewritten sentences, acknowledge the gaps that remain, then approve the packet when it sounds like you." : isRunning ? "Approval and downloads stay locked until the evidence rehearsal reaches your review step." : "Complete the rehearsal and tailoring steps to create a document you can review."}</p></div></div>
+    {isRunning && <p className="review-running-note" role="status">The rehearsal is active. Approval and exports will unlock only after it has finished and presented its evidence-bound review.</p>}
+    <div className="review-checks"><ReviewCheck complete={patches.length > 0} label={`${patches.length || "No"} evidence-linked resume revisions`} /><ReviewCheck complete label={gaps.length ? `${gaps.length} growth area${gaps.length > 1 ? "s" : ""} kept visible` : "No unmet role requirements detected"} /><ReviewCheck complete={Boolean(readiness?.passed && extractionPassed)} label={readiness?.passed ? "One-column export passed a real PDF text check" : "Export readiness will be checked before approval"} /><ReviewCheck complete={runState === "approved"} label={runState === "approved" ? "Your approval has been recorded" : "Your approval is still required"} /></div>
+    {readiness && <div className="readiness-note"><span>{readiness.passed ? "✓" : "!"}</span><p><b>Document QA</b> · {readiness.verified_bullets} verified bullet{readiness.verified_bullets === 1 ? "" : "s"}; {readiness.extracted_characters} characters read back from the generated PDF.</p></div>}
+    <div className="review-actions">
+      {runState === "awaiting_approval" && <button className="approve-action" onClick={onApprove} disabled={!serviceOnline || isApproving}>{!serviceOnline ? "Approval paused" : isApproving ? "Saving your approval…" : "I've reviewed this packet"} <span>→</span></button>}
+      {runState === "approved" && (
+        <>
+          <button className="approve-action export" onClick={() => onExport("docx")} disabled={!serviceOnline || Boolean(isExporting)}>{isExporting === "docx" ? "Preparing .docx…" : "Download .docx"} <span>↓</span></button>
+          <button className="outline-action" onClick={() => onExport("pdf")} disabled={!serviceOnline || Boolean(isExporting)}>{isExporting === "pdf" ? "Preparing PDF…" : "Printable PDF"} <span>↓</span></button>
+          {selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="outline-action" onClick={() => onOpenOfficial(selectedJob.url)} disabled={Boolean(isExporting)}>Open official listing ↗</button>}
+        </>
+      )}
+      {!ready && !isRunning && <span className="locked-action">Complete a rehearsal to unlock review</span>}
+    </div>
+  </div>;
 }
 
 function ReviewCheck({ complete, label }: { complete: boolean; label: string }) { return <div className={cx("review-check", complete && "complete")}><span>{complete ? "✓" : "○"}</span><p>{label}</p></div>; }
 function EvidenceGroup({ label, tone, items }: { label: string; tone: "mint" | "amber" | "coral"; items: string[] }) { return <section className={cx("evidence-group", tone)}><div><span /> <b>{label}</b><small>{items.length}</small></div><p>{items.slice(0, 3).join(" · ") || "No evidence yet"}</p></section>; }
 
-function CandidateModal({ candidate, onClose, onChange, onRestore, onAnalyze, onUpload, isAnalyzing, isImporting, serviceOnline }: { candidate: Candidate; onClose: () => void; onChange: (field: keyof Candidate, value: string) => void; onRestore: () => void; onAnalyze: () => void; onUpload: (file: File) => void; isAnalyzing: boolean; isImporting: boolean; serviceOnline: boolean }) {
-  return <ModalShell onClose={onClose} eyebrow="YOUR PROFILE" title="Keep your evidence current."><p className="modal-copy">Import a real PDF, DOCX, or TXT CV, or paste text below. The document is parsed in memory for this session; HireSwarm does not retain the original file.</p>{!serviceOnline && <p className="modal-service-note" role="status">The API is offline. You may review or edit this local draft, but importing and refreshing evidence are paused.</p>}<label className="upload-drop"><span>IMPORT CV</span><input type="file" disabled={!serviceOnline} accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) onUpload(file); event.currentTarget.value = ""; }} /><b>{isImporting ? "Reading your document…" : serviceOnline ? "Choose a PDF, DOCX, or TXT file" : "Import paused while offline"}</b><small>Text-based PDFs only · 6 MB maximum · source file is not stored</small></label><label>Name<input value={candidate.name} onChange={(event) => onChange("name", event.target.value)} /></label><label>Professional headline<input value={candidate.headline} onChange={(event) => onChange("headline", event.target.value)} /></label><label>Resume text<textarea rows={8} value={candidate.resume_text} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange("resume_text", event.target.value)} /></label><div className="modal-evidence"><b>{candidate.evidence.length} evidence notes protected</b><span>We only promote a statement after it has a source.</span></div><div className="modal-actions"><button className="text-action" onClick={onRestore}>Restore practice profile</button><div><button className="outline-action" onClick={onAnalyze} disabled={!serviceOnline || isAnalyzing || isImporting}>{isAnalyzing ? "Reading resume…" : "Refresh evidence"}</button><button className="primary-action small" onClick={onClose}>Save changes</button></div></div></ModalShell>;
+function CandidateModal({ candidate, onClose, onChange, onRestore, onAnalyze, onUpload, isAnalyzing, isImporting, serviceOnline, runIsActive }: { candidate: Candidate; onClose: () => void; onChange: (field: keyof Candidate, value: string) => void; onRestore: () => void; onAnalyze: () => void; onUpload: (file: File) => void; isAnalyzing: boolean; isImporting: boolean; serviceOnline: boolean; runIsActive: boolean }) {
+  const controlsLocked = !serviceOnline || runIsActive;
+  return <ModalShell onClose={onClose} eyebrow="YOUR PROFILE" title="Keep your evidence current."><p className="modal-copy">Import a real PDF, DOCX, or TXT CV, or paste text below. The document is parsed in memory for this session; HireSwarm does not retain the original file.</p>{!serviceOnline && <p className="modal-service-note" role="status">The API is offline. You may review or edit this local draft, but importing and refreshing evidence are paused.</p>}{runIsActive && <p className="modal-service-note" role="status">A rehearsal is using the current evidence ledger. Profile edits are locked until its review is complete.</p>}<label className="upload-drop"><span>IMPORT CV</span><input type="file" disabled={controlsLocked} accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) onUpload(file); event.currentTarget.value = ""; }} /><b>{isImporting ? "Reading your document…" : controlsLocked ? "Import paused until the active run finishes" : "Choose a PDF, DOCX, or TXT file"}</b><small>Text-based PDFs only · 6 MB maximum · source file is not stored</small></label><label>Name<input disabled={runIsActive} value={candidate.name} onChange={(event) => onChange("name", event.target.value)} /></label><label>Professional headline<input disabled={runIsActive} value={candidate.headline} onChange={(event) => onChange("headline", event.target.value)} /></label><label>Resume text<textarea disabled={runIsActive} rows={8} value={candidate.resume_text} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange("resume_text", event.target.value)} /></label><div className="modal-evidence"><b>{candidate.evidence.length} evidence notes protected</b><span>We only promote a statement after it has a source.</span></div><div className="modal-actions"><button className="text-action" onClick={onRestore} disabled={runIsActive}>Restore practice profile</button><div><button className="outline-action" onClick={onAnalyze} disabled={controlsLocked || isAnalyzing || isImporting}>{isAnalyzing ? "Reading resume…" : "Refresh evidence"}</button><button className="primary-action small" onClick={onClose}>Save changes</button></div></div></ModalShell>;
 }
 
 function JobModal({ title, company, location, url, description, onTitle, onCompany, onLocation, onUrl, onDescription, onClose, onSubmit }: { title: string; company: string; location: string; url: string; description: string; onTitle: (value: string) => void; onCompany: (value: string) => void; onLocation: (value: string) => void; onUrl: (value: string) => void; onDescription: (value: string) => void; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <ModalShell onClose={onClose} eyebrow="ADD A TARGET" title="Bring your own job brief."><p className="modal-copy">Paste a job description from a listing you trust. It stays visibly labeled as applicant-provided, and you retain the original URL for the final apply step.</p><form onSubmit={onSubmit}><div className="field-grid"><label>Role title<input required minLength={2} value={title} onChange={(event) => onTitle(event.target.value)} /></label><label>Company<input required minLength={2} value={company} onChange={(event) => onCompany(event.target.value)} /></label><label>Location<input value={location} onChange={(event) => onLocation(event.target.value)} /></label><label>Official listing URL <input type="url" value={url} onChange={(event) => onUrl(event.target.value)} placeholder="https://…" /></label></div><label>Job description<textarea required minLength={20} rows={9} value={description} onChange={(event) => onDescription(event.target.value)} placeholder="Paste the role, responsibilities, and requirements here…" /></label><div className="modal-actions"><button type="button" className="text-action" onClick={onClose}>Cancel</button><button className="primary-action small" type="submit">Add to shortlist <span>→</span></button></div></form></ModalShell>;
+  return <ModalShell onClose={onClose} eyebrow="ADD A TARGET" title="Bring your own job brief."><p className="modal-copy">Paste a job description from a listing you trust. It stays visibly labeled as applicant-provided, and you retain the original URL for the final apply step. HireSwarm does not fetch this URL or apply for you.</p><form onSubmit={onSubmit}><div className="field-grid"><label>Role title<input required minLength={2} value={title} onChange={(event) => onTitle(event.target.value)} /></label><label>Company<input required minLength={2} value={company} onChange={(event) => onCompany(event.target.value)} /></label><label>Location<input value={location} onChange={(event) => onLocation(event.target.value)} /></label><label>Official listing URL <input type="url" pattern="https://.*" value={url} onChange={(event) => onUrl(event.target.value)} placeholder="https://…" title="Use a public HTTPS listing URL, or leave this optional field blank." /><small>Optional · public HTTPS only · kept as a link, never fetched by HireSwarm</small></label></div><label>Job description<textarea required minLength={20} rows={9} value={description} onChange={(event) => onDescription(event.target.value)} placeholder="Paste the role, responsibilities, and requirements here…" /></label><div className="modal-actions"><button type="button" className="text-action" onClick={onClose}>Cancel</button><button className="primary-action small" type="submit">Add to shortlist <span>→</span></button></div></form></ModalShell>;
 }
 
 function LiveRolesModal({ onClose, onDiscover, onConnect }: { onClose: () => void; onDiscover: (query: string, source: "all" | "remotive" | "arbeitnow") => Promise<void>; onConnect: (source: "greenhouse" | "lever", board: string) => Promise<void> }) {
@@ -664,7 +801,7 @@ function LiveRolesModal({ onClose, onDiscover, onConnect }: { onClose: () => voi
   const [busy, setBusy] = useState(false);
   async function find(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); try { await onDiscover(query, feed); } finally { setBusy(false); } }
   async function connect(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!board.trim()) return; setBusy(true); try { await onConnect(boardSource, board.trim()); } finally { setBusy(false); } }
-  return <ModalShell onClose={onClose} eyebrow="LIVE ROLE SOURCES" title="Start from a published opening."><p className="modal-copy">HireSwarm reads public listings only. It never asks for employer credentials and never sends an application on your behalf.</p><section className="source-option"><div><span className="source-badge live">LIVE FEEDS</span><h3>Discover public remote roles</h3><p>Remotive and Arbeitnow are fetched only when you ask. Remotive results are cached for six hours to respect the public API&apos;s rate guidance.</p></div><form onSubmit={find}><div className="field-grid compact"><label>Search terms<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. Python backend" /></label><label>Source<select value={feed} onChange={(event) => setFeed(event.target.value as "all" | "remotive" | "arbeitnow")}><option value="all">All public feeds</option><option value="remotive">Remotive</option><option value="arbeitnow">Arbeitnow</option></select></label></div><button className="outline-action" disabled={busy}>{busy ? "Checking…" : "Find live roles"} <span>↗</span></button></form></section><section className="source-option"><div><span className="source-badge official">OFFICIAL ATS BOARD</span><h3>Connect one company&apos;s public board</h3><p>Paste a public Greenhouse or Lever board URL/token. HireSwarm uses their read-only published postings API, then keeps the official apply link intact.</p></div><form onSubmit={connect}><div className="field-grid compact"><label>Board type<select value={boardSource} onChange={(event) => setBoardSource(event.target.value as "greenhouse" | "lever")}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></label><label>Public board URL or token<input required value={board} onChange={(event) => setBoard(event.target.value)} placeholder={boardSource === "greenhouse" ? "boards.greenhouse.io/company" : "jobs.lever.co/company"} /></label></div><button className="primary-action small" disabled={busy}>{busy ? "Connecting…" : "Read published roles"} <span>→</span></button></form></section><p className="source-footnote">If a public source is unavailable, no lookalike fixture is shown. You can always paste the role directly.</p></ModalShell>;
+  return <ModalShell onClose={onClose} eyebrow="LIVE ROLE SOURCES" title="Start from a published opening."><p className="modal-copy">HireSwarm reads public listings only. It never asks for employer credentials and never sends an application on your behalf.</p><section className="source-option"><div><span className="source-badge live">LIVE FEEDS</span><h3>Discover public remote roles</h3><p>Remotive and Arbeitnow are fetched only when you ask. Enter at least two characters; results are capped at 12. Remotive results are cached for six hours to respect the public API&apos;s rate guidance.</p></div><form onSubmit={find}><div className="field-grid compact"><label>Search terms (2+ characters)<input required minLength={2} maxLength={120} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. Python backend" /></label><label>Source<select value={feed} onChange={(event) => setFeed(event.target.value as "all" | "remotive" | "arbeitnow")}><option value="all">All public feeds</option><option value="remotive">Remotive</option><option value="arbeitnow">Arbeitnow</option></select></label></div><button className="outline-action" disabled={busy}>{busy ? "Checking…" : "Find live roles"} <span>↗</span></button></form></section><section className="source-option"><div><span className="source-badge official">OFFICIAL ATS BOARD</span><h3>Connect one company&apos;s public board</h3><p>Paste a board token or an HTTPS URL on boards.greenhouse.io, job-boards.greenhouse.io, or jobs.lever.co. HireSwarm only calls the documented provider API and keeps the official apply link intact.</p></div><form onSubmit={connect}><div className="field-grid compact"><label>Board type<select value={boardSource} onChange={(event) => setBoardSource(event.target.value as "greenhouse" | "lever")}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></label><label>Public board URL or token<input required value={board} onChange={(event) => setBoard(event.target.value)} placeholder={boardSource === "greenhouse" ? "boards.greenhouse.io/company" : "jobs.lever.co/company"} /></label></div><button className="primary-action small" disabled={busy}>{busy ? "Connecting…" : "Read published roles"} <span>→</span></button></form></section><p className="source-footnote">If a public source is unavailable, no lookalike fixture is shown. You can always paste the role directly.</p></ModalShell>;
 }
 
 function HowItWorksModal({ onClose, onOpenProfile, onOpenLive, onOpenManual }: { onClose: () => void; onOpenProfile: () => void; onOpenLive: () => void; onOpenManual: () => void }) {

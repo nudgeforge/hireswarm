@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import importlib
+from concurrent.futures import ThreadPoolExecutor
 import sys
+import tempfile
 import unittest
 import warnings
 from unittest.mock import AsyncMock, patch
@@ -23,6 +25,7 @@ from docx import Document
 from fastapi.testclient import TestClient
 from pypdf import PdfReader
 from reportlab.pdfgen.canvas import Canvas
+import httpx
 
 from app.data import DEMO_CANDIDATE, DEMO_JOBS
 from app.documents import _application_bullets, build_docx, build_pdf, export_readiness
@@ -30,7 +33,7 @@ from app.evidence import build_cover_letter, build_safe_patches, cover_letter_ev
 from app.main import _candidate_from_text, app, candidate_as_dict, execute_evidence_lab
 from app.schemas import CandidateInput, RunStatus
 main_module = importlib.import_module("app.main")
-from app.sources import display_posted, greenhouse_token, lever_slug
+from app.sources import MAX_PUBLIC_RESPONSE_BYTES, clean_text, display_posted, fetch_greenhouse, fetch_public_json, greenhouse_token, lever_slug, safe_http_url
 
 
 class RealWorkflowTests(unittest.TestCase):
@@ -59,6 +62,75 @@ class RealWorkflowTests(unittest.TestCase):
             greenhouse_token("https://evil.example/stripe")
         with self.assertRaises(ValueError):
             lever_slug("https://evil.example/metabase")
+
+    def test_board_identifiers_require_https_allowlisted_urls_but_keep_bare_tokens_safe(self):
+        self.assertEqual(greenhouse_token("stripe"), "stripe")
+        self.assertEqual(lever_slug("metabase"), "metabase")
+        for unsafe in (
+            "http://boards.greenhouse.io/stripe",
+            "https://user:pass@boards.greenhouse.io/stripe",
+            "https://localhost/stripe",
+            "https://127.0.0.1/stripe",
+            "https://boards.greenhouse.io:8443/stripe",
+            "https://jobs.lever.co@evil.example/metabase",
+        ):
+            with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
+                greenhouse_token(unsafe)
+        with self.assertRaises(ValueError):
+            lever_slug("http://jobs.lever.co/metabase")
+
+    def test_source_html_is_converted_to_inert_text_without_script_or_style_contents(self):
+        text = clean_text('<p>Build <b>Python</b> APIs &amp; tools.</p><script>alert("xss")</script><style>.hidden{display:none}</style><img src=x onerror=alert(1)>')
+        self.assertEqual(text, "Build Python APIs & tools.")
+        self.assertNotIn("alert", text)
+        self.assertNotIn("hidden", text)
+
+    def test_source_links_keep_only_public_https_targets(self):
+        self.assertEqual(safe_http_url("https://careers.example.com/jobs/7"), "https://careers.example.com/jobs/7")
+        for unsafe in ("javascript:alert(1)", "http://example.com/job", "https://127.0.0.1/job", "https://localhost/job", "https://user:pass@example.com/job"):
+            with self.subTest(unsafe=unsafe):
+                self.assertEqual(safe_http_url(unsafe), "")
+
+    def test_public_json_reader_rejects_redirects_and_oversized_bodies(self):
+        requested: list[str] = []
+
+        def redirect(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/internal"}, request=request)
+
+        with self.assertRaises(httpx.HTTPStatusError):
+            asyncio.run(fetch_public_json("https://boards-api.greenhouse.io/v1/boards/stripe/jobs", transport=httpx.MockTransport(redirect)))
+        self.assertEqual(requested, ["https://boards-api.greenhouse.io/v1/boards/stripe/jobs"])
+
+        def oversized(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "application/json"}, content=b" " * (MAX_PUBLIC_RESPONSE_BYTES + 1), request=request)
+
+        with self.assertRaisesRegex(ValueError, "too large"):
+            asyncio.run(fetch_public_json("https://api.lever.co/v0/postings/example", transport=httpx.MockTransport(oversized)))
+
+    def test_greenhouse_reads_compact_index_then_only_bounded_detail_records(self):
+        calls: list[str] = []
+
+        async def provider_response(url: str, **_kwargs):
+            calls.append(url)
+            if "content=false" in url:
+                return {"jobs": [{
+                    "id": index, "title": f"Role {index}", "location": {"name": "Remote"},
+                    "absolute_url": f"https://boards.greenhouse.io/example/jobs/{index}", "updated_at": "2026-01-01",
+                } for index in range(20)]}
+            job_id = url.rsplit("/", 1)[-1]
+            return {
+                "id": int(job_id), "title": f"Role {job_id}", "location": {"name": "Remote"},
+                "absolute_url": f"https://boards.greenhouse.io/example/jobs/{job_id}",
+                "content": f"<p>Build Python services for role {job_id}.</p><script>ignored()</script>", "updated_at": "2026-01-01",
+            }
+
+        with patch("app.sources.fetch_public_json", new=AsyncMock(side_effect=provider_response)):
+            jobs = asyncio.run(fetch_greenhouse("example", limit=99))
+        self.assertEqual(len(jobs), 12)
+        self.assertIn("content=false", calls[0])
+        self.assertEqual(len(calls), 13)  # one compact index plus 12 detail records
+        self.assertTrue(all("ignored" not in job["description"] for job in jobs))
 
     def test_remotive_cache_filters_each_request_and_never_leaks_other_provider_jobs(self):
         remotive_job = {
@@ -89,6 +161,66 @@ class RealWorkflowTests(unittest.TestCase):
             main_module.REMOTIVE_CACHE.clear()
             main_module.REMOTIVE_CACHE_AT = None
             main_module.REMOTIVE_CACHE_ERROR = None
+
+    def test_live_queries_require_two_characters_on_both_route_contracts(self):
+        client = TestClient(app)
+        for path in ("/api/jobs/live?query=x", "/api/jobs?mode=live&query=%20"):
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("at least 2", response.json()["detail"])
+        long_query = "x" * 121
+        response = client.get(f"/api/jobs/live?query={long_query}")
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("120 characters", response.json()["detail"])
+
+    def test_static_deep_routes_are_shareable_and_unknown_browser_route_is_html_404(self):
+        previous_static_dir = main_module.STATIC_DIR
+        with tempfile.TemporaryDirectory() as directory:
+            static_dir = Path(directory)
+            (static_dir / "404.html").write_text("<html><title>HireSwarm — Not found</title><main>Not found</main></html>")
+            for route in ("workspace", "applications", "practice", "documents"):
+                (static_dir / f"{route}.html").write_text(f"<html><body>{route} route</body></html>")
+            main_module.STATIC_DIR = static_dir
+            try:
+                client = TestClient(app)
+                for route in ("workspace", "applications", "practice", "documents"):
+                    response = client.get(f"/{route}")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertIn(f"{route} route", response.text)
+                missing = client.get("/not-a-real-page")
+                self.assertEqual(missing.status_code, 404)
+                self.assertTrue(missing.headers["content-type"].startswith("text/html"))
+                self.assertIn("HireSwarm", missing.text)
+                self.assertEqual(client.get("/api/not-a-route").status_code, 404)
+                self.assertTrue(client.get("/api/not-a-route").headers["content-type"].startswith("application/json"))
+                self.assertEqual(client.get("/missing.js").status_code, 404)
+                self.assertTrue(client.get("/missing.js").headers["content-type"].startswith("application/json"))
+            finally:
+                main_module.STATIC_DIR = previous_static_dir
+
+    def test_public_job_response_is_capped_and_long_description_stays_server_side(self):
+        raw_description = "x" * 9_000
+        jobs = [{
+            "id": f"public-{index}", "origin": "public_cache", "source": "Test source", "title": f"Role {index}",
+            "company": "Example", "description": raw_description, "must_have": ["Python"], "preferred": [],
+            "url": "https://careers.example.com/job", "retrieved_at": "2026-01-01T00:00:00+00:00",
+        } for index in range(20)]
+        main_module.REMOTIVE_CACHE.clear()
+        main_module.REMOTIVE_CACHE_AT = None
+        main_module.REMOTIVE_CACHE_ERROR = None
+        try:
+            with patch.object(main_module, "fetch_remotive", new=AsyncMock(return_value=jobs)), patch.object(main_module, "fetch_arbeitnow", new=AsyncMock(return_value=[])):
+                payload = asyncio.run(main_module.public_jobs(query="role", source="all"))
+            self.assertEqual(len(payload["jobs"]), main_module.PUBLIC_RESULT_LIMIT)
+            self.assertTrue(all(len(item["description"]) <= main_module.CLIENT_DESCRIPTION_LIMIT for item in payload["jobs"]))
+            self.assertEqual(main_module.JOBS["public-0"]["description"], raw_description)
+        finally:
+            main_module.REMOTIVE_CACHE.clear()
+            main_module.REMOTIVE_CACHE_AT = None
+            main_module.REMOTIVE_CACHE_ERROR = None
+            for job in jobs:
+                main_module.JOBS.pop(job["id"], None)
 
     def test_incomplete_applicant_is_not_silently_replaced_by_practice_evidence(self):
         applicant = CandidateInput(name="Real Applicant", resume_text="", evidence=[])
@@ -258,15 +390,23 @@ Reduced manual reporting time by 40 percent with a React dashboard.
         self.assertEqual(set(patches[0]["covered_requirements"]), {"Python", "FastAPI", "REST APIs", "Docker"})
         self.assertEqual(patches[0]["evidence_ids"], ["cv_01"])
 
-    def test_normalize_drops_stale_evidence_when_current_resume_has_no_proof(self):
+    def test_normalize_rejects_empty_resume_instead_of_retaining_or_erasing_stale_evidence(self):
         client = TestClient(app)
         response = client.post("/api/candidate/normalize", json={
             "name": "Taylor Example", "headline": "Applicant", "location": "Remote", "preferences": [],
             "resume_text": "", 
             "evidence": [{"evidence_id": "old_01", "source_section": "Old file", "source_text": "Built a hidden stale project.", "skills": ["Python"], "status": "verified"}],
         })
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["evidence"], [])
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("resume text", response.json()["detail"].lower())
+
+    def test_normalize_rejects_text_without_reviewable_work_statement(self):
+        response = TestClient(app).post("/api/candidate/normalize", json={
+            "name": "Taylor Example", "headline": "Applicant", "location": "Remote", "preferences": [],
+            "resume_text": "Taylor Example\nMotivated learner seeking an opportunity.", "evidence": [],
+        })
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("reviewable evidence", response.json()["detail"].lower())
 
     def test_empty_ledger_cannot_start_an_application_packet(self):
         client = TestClient(app)
@@ -295,7 +435,18 @@ Reduced manual reporting time by 40 percent with a React dashboard.
             "title": "Engineer", "company": "Example", "description": "Python work", "url": "javascript:alert(1)",
         })
         self.assertEqual(response.status_code, 422)
-        self.assertIn("http://", response.json()["detail"])
+        self.assertIn("https://", response.json()["detail"])
+
+    def test_manual_role_requires_public_https_url_and_never_fetches_it(self):
+        client = TestClient(app)
+        base = {"title": "Engineer", "company": "Example", "description": "Build Python services with clear ownership.", "url": ""}
+        for unsafe in ("http://careers.example.com/job", "https://localhost/job", "https://127.0.0.1/job", "https://user:pass@careers.example.com/job"):
+            with self.subTest(unsafe=unsafe):
+                response = client.post("/api/jobs/manual", json={**base, "url": unsafe})
+                self.assertEqual(response.status_code, 422, response.text)
+        response = client.post("/api/jobs/manual", json={**base, "url": "https://careers.example.com/job"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["url"], "https://careers.example.com/job")
 
     def test_manual_role_extracts_extended_controlled_skill_taxonomy(self):
         client = TestClient(app)
@@ -342,6 +493,39 @@ Reduced manual reporting time by 40 percent with a React dashboard.
             readiness = main_module.RUNS[run_id].result["export_readiness"]
             integrity = next(item for item in readiness["checks"] if item["label"] == "Server-side evidence integrity")
             self.assertFalse(integrity["passed"])
+        finally:
+            main_module.RUNS.pop(run_id, None)
+
+    def test_approval_is_idempotent_for_double_click_tabs_refresh_and_sse(self):
+        run_id = "run-idempotent-approval-test"
+        main_module.RUNS[run_id] = RunStatus(
+            id=run_id, status="awaiting_approval", selected_job_id="atlas-ai-backend", mode="evidence_lab", result=self._result(),
+        )
+        try:
+            def approve_once():
+                with TestClient(app) as client:
+                    return client.post(f"/api/runs/{run_id}/approve")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                responses = list(pool.map(lambda _: approve_once(), range(2)))
+            self.assertTrue(all(response.status_code == 200 for response in responses), [response.text for response in responses])
+            payloads = [response.json() for response in responses]
+            self.assertEqual(sum(bool(payload.get("already_approved")) for payload in payloads), 1)
+            self.assertEqual(sum(event.type == "approved" for event in main_module.RUNS[run_id].events), 1)
+
+            # A page refresh / repeated click receives the same approved state,
+            # and the terminal SSE history contains only the single approval.
+            with TestClient(app) as client:
+                refreshed = client.post(f"/api/runs/{run_id}/approve")
+                checkpoint = client.get(f"/api/runs/{run_id}")
+                stream = client.get(f"/api/runs/{run_id}/events")
+            self.assertEqual(refreshed.status_code, 200)
+            self.assertTrue(refreshed.json()["already_approved"])
+            self.assertEqual(checkpoint.status_code, 200)
+            self.assertEqual(checkpoint.json()["status"], "approved")
+            self.assertEqual(checkpoint.json()["event_count"], 1)
+            self.assertEqual(stream.status_code, 200)
+            self.assertEqual(stream.text.count('"type": "approved"'), 1)
         finally:
             main_module.RUNS.pop(run_id, None)
 

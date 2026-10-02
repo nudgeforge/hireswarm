@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -69,7 +71,16 @@ async def production_response_guards(request: Request, call_next):
     return response
 
 
+# Keep discovery payloads useful on mobile without shipping dozens of long
+# third-party descriptions into the browser. The server retains the source job
+# record for the selected evidence workflow; API list responses are compact.
+PUBLIC_RESULT_LIMIT = 12
+CLIENT_DESCRIPTION_LIMIT = 4_000
+
 RUNS: dict[str, RunStatus] = {}
+# Protect approval's check-and-transition sequence across duplicate clicks,
+# browser tabs, and threaded/multi-request test clients.
+APPROVAL_LOCK = Lock()
 JOBS: dict[str, dict[str, Any]] = {job["id"]: copy.deepcopy(job) for job in DEMO_JOBS}
 # Remotive asks clients to poll sparingly. Cache its unfiltered public feed so
 # later searches can be correctly filtered without re-fetching or leaking jobs
@@ -97,22 +108,44 @@ def candidate_as_dict(candidate: CandidateInput | None) -> dict[str, Any]:
 
 
 def normalized_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact, display-safe job record without mutating server state."""
     response = dict(job)
     response.pop("interview_questions", None)
     origin = response.get("origin")
     response.setdefault("retrieved_at", None)
     response.setdefault("cache_state", "fixture" if origin == "demo_fixture" else "candidate" if origin == "user_pasted" else "fresh")
+    description = str(response.get("description", "")).strip()
+    if len(description) > CLIENT_DESCRIPTION_LIMIT:
+        response["description"] = f"{description[:CLIENT_DESCRIPTION_LIMIT - 1].rstrip()}…"
     return response
 
 
 def checked_application_url(value: str) -> str:
-    """Accept only a normal web URL before the browser is allowed to open it."""
+    """Keep manual listing links HTTPS and browser-safe without server-side fetching.
+
+    Manual links are applicant-controlled and are never fetched by HireSwarm,
+    which prevents SSRF by design. We additionally reject credentials, local
+    hosts, and literal non-public IP addresses before the browser can open one.
+    """
     url = value.strip()
     if not url:
         return ""
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=422, detail="Use a full http:// or https:// official listing URL, or leave it blank.")
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme != "https" or not parsed.netloc or not hostname:
+        raise HTTPException(status_code=422, detail="Use a full https:// official listing URL, or leave it blank.")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="Listing URLs cannot contain embedded credentials.")
+    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".local"):
+        raise HTTPException(status_code=422, detail="Listing URLs must use a public HTTPS host, not localhost or a local network host.")
+    try:
+        address = ipaddress.ip_address(hostname)
+        if not address.is_global:
+            raise HTTPException(status_code=422, detail="Listing URLs must use a public HTTPS host, not a private or loopback address.")
+    except ValueError:
+        # A DNS name is not resolved or fetched by this service. The final URL
+        # remains a user-controlled browser navigation only.
+        pass
     return url
 
 
@@ -121,6 +154,15 @@ def required_manual_text(value: str, field: str, minimum: int = 2) -> str:
     if len(cleaned) < minimum:
         raise HTTPException(status_code=422, detail=f"{field} needs at least {minimum} non-space characters.")
     return cleaned
+
+
+def required_live_query(value: str) -> str:
+    query = value.strip()
+    if len(query) < 2:
+        raise HTTPException(status_code=422, detail="Enter at least 2 characters to search published roles.")
+    if len(query) > 120:
+        raise HTTPException(status_code=422, detail="Keep a live-role query to 120 characters or fewer.")
+    return query
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
@@ -138,7 +180,8 @@ async def healthz() -> dict[str, Any]:
         "ok": True,
         "service": "HireSwarm Evidence Lab",
         "mode": "deterministic evidence engine",
-        "optional_crewai": bool(os.getenv("USE_CREWAI")),
+        # This reports usable provider-backed CrewAI, not merely an opt-in flag.
+        "optional_crewai": crewai_available(),
         "time": now(),
     }
 
@@ -151,10 +194,15 @@ async def demo_candidate() -> dict[str, Any]:
 @app.post("/api/candidate/normalize")
 async def normalize_candidate(payload: CandidateInput) -> dict[str, Any]:
     candidate = payload.model_dump()
-    # A refresh must never retain stale proof from an older resume. If the
-    # current text produces no literal action/impact statements, return an
-    # empty ledger and let the UI ask the applicant to correct the source.
-    candidate["evidence"] = extract_evidence_from_resume(candidate.get("resume_text", ""))
+    resume_text = str(candidate.get("resume_text", "")).strip()
+    if not resume_text:
+        raise HTTPException(status_code=422, detail="Add resume text before refreshing the evidence ledger.")
+    # A refresh must never retain stale proof from an older resume. Empty or
+    # non-evidentiary text is not represented as a successful normalization.
+    evidence = extract_evidence_from_resume(resume_text)
+    if not evidence:
+        raise HTTPException(status_code=422, detail="No reviewable evidence was found in that resume text. Add literal work, project, or outcome statements and try again.")
+    candidate["evidence"] = evidence
     return candidate
 
 
@@ -218,17 +266,17 @@ async def upload_candidate_cv(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.get("/api/jobs")
 async def list_jobs(mode: str = "demo", query: str = "") -> dict[str, Any]:
-    """Return visibly-labelled fixtures or a cached, real public-source result."""
+    """Return visibly-labelled fixtures or a bounded, user-requested public result."""
     if mode != "live":
         return {
             "mode": "demo_fixture",
             "jobs": [normalized_job(job) for job in JOBS.values() if job.get("origin") == "demo_fixture"],
             "provenance": {"label": "Practice fixtures", "retrieved_at": None, "cache_state": "fixture"},
         }
-    return await public_jobs(query=query)
+    return await public_jobs(query=required_live_query(query))
 
 
-async def _remotive_results(query: str) -> tuple[list[dict[str, Any]], str, list[str]]:
+async def _remotive_results(query: str, limit: int = PUBLIC_RESULT_LIMIT) -> tuple[list[dict[str, Any]], str, list[str]]:
     """Return query-filtered Remotive jobs from a cache of the raw public feed."""
     global REMOTIVE_CACHE_AT, REMOTIVE_CACHE_ERROR
     cache_valid = bool(REMOTIVE_CACHE and REMOTIVE_CACHE_AT and datetime.now(timezone.utc) - REMOTIVE_CACHE_AT < LIVE_CACHE_TTL)
@@ -251,7 +299,7 @@ async def _remotive_results(query: str) -> tuple[list[dict[str, Any]], str, list
     cache_state = "cached" if cache_valid else "fresh"
     filtered = [dict(job, cache_state=cache_state) for job in REMOTIVE_CACHE if matches_query(job, query)]
     errors = [REMOTIVE_CACHE_ERROR] if REMOTIVE_CACHE_ERROR else []
-    return filtered[:18], cache_state, errors
+    return filtered[:limit], cache_state, errors
 
 
 async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
@@ -268,7 +316,7 @@ async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
 
     if source in {"all", "arbeitnow"}:
         try:
-            arbeitnow = await fetch_arbeitnow(query=query, limit=18)
+            arbeitnow = await fetch_arbeitnow(query=query, limit=PUBLIC_RESULT_LIMIT)
             retrieved_at = now()
             for job in arbeitnow:
                 job["retrieved_at"] = retrieved_at
@@ -279,7 +327,7 @@ async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
             errors.append("Arbeitnow is temporarily unavailable. You can still paste a role or connect a public ATS board.")
             cache_states.append("unavailable")
 
-    deduped = list({job["id"]: job for job in jobs}.values())[:24]
+    deduped = list({job["id"]: job for job in jobs}.values())[:PUBLIC_RESULT_LIMIT]
     JOBS.update({job["id"]: job for job in deduped})
     available_states = {state for state in cache_states if state != "unavailable"}
     cache_state = "mixed" if len(available_states) > 1 else next(iter(available_states), "unavailable")
@@ -301,14 +349,14 @@ async def public_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
 async def list_live_jobs(query: str = "", source: str = "all") -> dict[str, Any]:
     if source not in {"all", "remotive", "arbeitnow"}:
         raise HTTPException(status_code=422, detail="Use all, remotive, or arbeitnow for public feed discovery.")
-    return await public_jobs(query=query, source=source)
+    return await public_jobs(query=required_live_query(query), source=source)
 
 
 @app.post("/api/jobs/public-board")
 async def import_public_board(payload: PublicBoardInput) -> dict[str, Any]:
     """Read a user-selected public Greenhouse/Lever board without employer credentials."""
     try:
-        jobs = await (fetch_greenhouse(payload.board) if payload.source == "greenhouse" else fetch_lever(payload.board))
+        jobs = await (fetch_greenhouse(payload.board, limit=PUBLIC_RESULT_LIMIT) if payload.source == "greenhouse" else fetch_lever(payload.board, limit=PUBLIC_RESULT_LIMIT))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -577,12 +625,22 @@ async def create_run(payload: RunCreate) -> dict[str, Any]:
 
 
 @app.get("/api/runs/{run_id}")
-async def get_run(run_id: str) -> RunStatus:
+async def get_run(run_id: str) -> dict[str, Any]:
+    """Return a compact run checkpoint so a refreshed browser can resume SSE."""
     run = RUNS.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
-
+    selected_job = JOBS.get(run.selected_job_id)
+    return {
+        "id": run.id,
+        "status": run.status,
+        "selected_job_id": run.selected_job_id,
+        "mode": run.mode,
+        "event_count": len(run.events),
+        # A refreshed client needs the target label, but list-safe normalization
+        # avoids replaying unbounded third-party descriptions into the browser.
+        "job": normalized_job(selected_job) if selected_job else None,
+    }
 
 @app.get("/api/runs/{run_id}/events")
 async def stream_run_events(run_id: str):
@@ -614,17 +672,24 @@ async def stream_run_events(run_id: str):
 
 @app.post("/api/runs/{run_id}/approve")
 async def approve_run(run_id: str) -> dict[str, Any]:
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    if run.status != "awaiting_approval":
-        raise HTTPException(status_code=409, detail="Run is not ready for approval")
-    readiness = refresh_export_readiness(run)
-    if not readiness.get("passed"):
-        raise HTTPException(status_code=409, detail="Document QA has not passed, so this packet cannot be approved or exported.")
-    run.status = "approved"
-    event(run, "approved", "Application packet approved", "Document export is unlocked. The official application link remains user-controlled.", "HITL Release Custodian")
-    return {"ok": True, "status": run.status, "result": run.result}
+    # This check-and-transition deliberately contains no await points. The lock
+    # also protects it when two HTTP clients arrive in different worker threads.
+    with APPROVAL_LOCK:
+        run = RUNS.get(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        # Approval is idempotent: a double-click or a second tab receives the
+        # already-approved packet without creating another approval event.
+        if run.status == "approved":
+            return {"ok": True, "status": run.status, "result": run.result, "already_approved": True}
+        if run.status != "awaiting_approval":
+            raise HTTPException(status_code=409, detail="Run is not ready for approval")
+        readiness = refresh_export_readiness(run)
+        if not readiness.get("passed"):
+            raise HTTPException(status_code=409, detail="Document QA has not passed, so this packet cannot be approved or exported.")
+        run.status = "approved"
+        event(run, "approved", "Application packet approved", "Document export is unlocked. The official application link remains user-controlled.", "HITL Release Custodian")
+        return {"ok": True, "status": run.status, "result": run.result}
 
 
 @app.get("/api/runs/{run_id}/export-readiness")
@@ -692,11 +757,11 @@ async def serve_frontend_or_json_404(asset_path: str) -> Response:
         except ValueError:
             return JSONResponse(status_code=404, content={"detail": "Route not found"})
 
-    # Asset-like paths should report a JSON 404. Route-like paths fall back to
-    # the app shell so unknown client routes can still be handled intentionally.
+    # API/asset misses are JSON. Unknown browser routes receive the exported
+    # Next not-found document with a real 404 status — never the workspace shell.
     if Path(asset_path).suffix:
         return JSONResponse(status_code=404, content={"detail": "Asset not found"})
-    index = STATIC_DIR / "index.html"
-    if index.is_file():
-        return FileResponse(index, media_type="text/html")
+    not_found = STATIC_DIR / "404.html"
+    if not_found.is_file():
+        return FileResponse(not_found, media_type="text/html", status_code=404)
     return JSONResponse(status_code=404, content={"detail": "Route not found"})

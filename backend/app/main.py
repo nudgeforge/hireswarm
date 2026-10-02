@@ -12,9 +12,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from docx import Document
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pypdf import PdfReader
 
 from .crewai_engine import available as crewai_available, run_optional_crew
@@ -36,6 +36,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Railway's production image can package the exported Next.js frontend beside
+# this API. Local/API-only operation remains unchanged when the directory is
+# absent. Never let an API failure silently turn into a frontend HTML response.
+STATIC_DIR = Path(os.getenv("HIRESWARM_STATIC_DIR", "")).resolve() if os.getenv("HIRESWARM_STATIC_DIR") else None
+
+
+@app.middleware("http")
+async def production_response_guards(request: Request, call_next):
+    response: Response = await call_next(request)
+    path = request.url.path
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;"
+    )
+    content_type = response.headers.get("content-type", "")
+    # The application shell can render applicant-specific state after hydration;
+    # never permit a CDN/browser to reuse it as a long-lived shared response.
+    if path == "/" or path.startswith("/api/") or path == "/healthz" or content_type.startswith("text/html"):
+        response.headers["Cache-Control"] = "private, no-store, max-age=0, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    elif response.status_code < 400 and (path.startswith("/_next/") or path.endswith((".js", ".css", ".svg", ".png", ".ico", ".woff2"))):
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif response.status_code >= 400:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
 
 RUNS: dict[str, RunStatus] = {}
 JOBS: dict[str, dict[str, Any]] = {job["id"]: copy.deepcopy(job) for job in DEMO_JOBS}
@@ -91,8 +123,12 @@ def required_manual_text(value: str, field: str, minimum: int = 2) -> str:
     return cleaned
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
+async def root() -> Response | dict[str, str]:
+    """Serve the bundled app in Railway, otherwise keep API-only health simple."""
+    index = STATIC_DIR / "index.html" if STATIC_DIR else None
+    if index and index.is_file():
+        return FileResponse(index, media_type="text/html")
     return {"service": "HireSwarm API", "mode": "evidence_lab"}
 
 
@@ -621,3 +657,46 @@ async def export_application_packet(run_id: str, format: str):
     else:
         raise HTTPException(status_code=404, detail="Use docx or pdf for an ATS-conscious application export.")
     return StreamingResponse(BytesIO(content), media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.api_route("/{asset_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_frontend_or_json_404(asset_path: str) -> Response:
+    """Serve exported frontend assets without converting missing API routes to HTML."""
+    if asset_path.startswith("api/") or asset_path.startswith("healthz"):
+        return JSONResponse(status_code=404, content={"detail": "Route not found"})
+    if not STATIC_DIR or not STATIC_DIR.is_dir():
+        return JSONResponse(status_code=404, content={"detail": "Route not found"})
+
+    requested = (STATIC_DIR / asset_path).resolve()
+    # Reject traversal before looking at the static tree.
+    try:
+        requested.relative_to(STATIC_DIR)
+    except ValueError:
+        return JSONResponse(status_code=404, content={"detail": "Route not found"})
+
+    if requested.is_file():
+        return FileResponse(requested)
+    directory_index = requested / "index.html"
+    if directory_index.is_file():
+        return FileResponse(directory_index, media_type="text/html")
+
+    # `next export` writes App Router pages as `workspace.html` rather than
+    # `workspace/index.html`. Prefer that route-specific static document so a
+    # deep link hydrates against matching initial markup instead of the root.
+    route_name = asset_path.rstrip("/")
+    route_export = (STATIC_DIR / f"{route_name}.html").resolve() if route_name else None
+    if route_export and route_export.is_file():
+        try:
+            route_export.relative_to(STATIC_DIR)
+            return FileResponse(route_export, media_type="text/html")
+        except ValueError:
+            return JSONResponse(status_code=404, content={"detail": "Route not found"})
+
+    # Asset-like paths should report a JSON 404. Route-like paths fall back to
+    # the app shell so unknown client routes can still be handled intentionally.
+    if Path(asset_path).suffix:
+        return JSONResponse(status_code=404, content={"detail": "Asset not found"})
+    index = STATIC_DIR / "index.html"
+    if index.is_file():
+        return FileResponse(index, media_type="text/html")
+    return JSONResponse(status_code=404, content={"detail": "Route not found"})

@@ -17,3 +17,10 @@ frontend/audit-*
 
 # Generated TypeScript state
 frontend/tsconfig.tsbuildinfo
+
+# Static export and one-off rendered inspection captures
+frontend/out/
+frontend/combined-*.png
+
+# Local static export smoke-test mirror
+frontend/static-export/

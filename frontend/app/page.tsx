@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Origin = "demo_fixture" | "public_cache" | "user_pasted";
@@ -20,7 +22,10 @@ type ExportReadiness = { passed: boolean; checks: ExportCheck[]; extracted_chara
 type SourceResponse = { mode: string; jobs: Job[]; provenance?: { label?: string; retrieved_at?: string | null; cache_state?: string; polling_policy?: string; board?: string }; source_errors?: string[] };
 type ImportInfo = { filename: string; format: string; characters_read: number; evidence_count: number; retention: string };
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "/backend";
+// Undefined keeps local Next.js rewrite behaviour. An explicitly empty value is
+// used by the Railway all-in-one image so API requests stay on the same origin.
+const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE;
+const API = configuredApiBase === undefined ? "/backend" : configuredApiBase.replace(/\/+$/, "");
 type ServiceStatus = "checking" | "online" | "offline";
 type ServiceHealth = { ok?: boolean; service?: string; mode?: string };
 
@@ -37,6 +42,7 @@ function detailFrom(payload: unknown): string | null {
 
 function unexpectedResponseMessage(response: Response, body: string): string {
   const html = /<\/?(?:!doctype|html|head|body)\b/i.test(body);
+  if (html && response.status === 404) return "The deployed HireSwarm API route is missing (404). Live actions are paused until the backend is deployed on this workspace URL.";
   if (html) return `HireSwarm received an HTML error page (${response.status || "network"}) instead of data. Nothing was changed — please retry in a moment.`;
   return `HireSwarm received an unreadable service response (${response.status || "network"}). Nothing was changed — please retry.`;
 }
@@ -100,6 +106,20 @@ const views: { id: WorkspaceView; label: string; number: string; hint: string }[
   { id: "review", label: "Review", number: "04", hint: "Make the call" },
 ];
 
+const routeForSection: Record<NavigationSection, string> = {
+  workspace: "/workspace",
+  applications: "/applications",
+  practice: "/practice",
+  documents: "/documents",
+};
+
+function routeState(pathname: string | null): { view: WorkspaceView; section: NavigationSection } {
+  if (pathname === "/applications") return { view: "match", section: "applications" };
+  if (pathname === "/practice") return { view: "rehearse", section: "practice" };
+  if (pathname === "/documents") return { view: "review", section: "documents" };
+  return { view: "match", section: "workspace" };
+}
+
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(" ");
 const initials = (name: string) => name.split(" ").filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "YK";
 const sourceLabel = (origin: Origin) => origin === "public_cache" ? "Live public listing" : origin === "user_pasted" ? "Pasted by you" : "Practice fixture";
@@ -111,12 +131,14 @@ const sourceDetail = (job?: Job) => {
 };
 
 export default function Home() {
+  const pathname = usePathname();
+  const router = useRouter();
   const [jobs, setJobs] = useState<Job[]>(fallbackJobs);
   const [showAllJobs, setShowAllJobs] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState(fallbackJobs[0].id);
   const [candidate, setCandidate] = useState<Candidate>(fallbackCandidate);
-  const [view, setView] = useState<WorkspaceView>("match");
-  const [activeNavigation, setActiveNavigation] = useState<NavigationSection>("workspace");
+  const [view, setView] = useState<WorkspaceView>(() => routeState(pathname).view);
+  const [activeNavigation, setActiveNavigation] = useState<NavigationSection>(() => routeState(pathname).section);
   const [runMode, setRunMode] = useState<RunMode>("evidence_lab");
   const [showEngineMenu, setShowEngineMenu] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
@@ -157,7 +179,8 @@ export default function Home() {
   const evidencePreviewSkills = Array.from(new Set(candidate.evidence.flatMap((item) => item.skills))).slice(0, 3);
   const proofItem = candidate.evidence.find((item) => item.metric) || candidate.evidence[0];
   const candidateFirstName = candidate.name.trim().split(/\s+/)[0] || "there";
-  const serviceCopy = serviceStatus === "online" ? "Service connected" : serviceStatus === "checking" ? "Checking connection" : "Service needs retry";
+  const serviceOnline = serviceStatus === "online";
+  const serviceCopy = serviceStatus === "online" ? "Service connected" : serviceStatus === "checking" ? "Checking connection" : "Service unavailable";
 
   async function checkService(showSuccess = false) {
     setServiceStatus("checking");
@@ -192,13 +215,21 @@ export default function Home() {
         setServiceStatus("online");
       } else {
         setServiceStatus("offline");
-        const reason = healthResult.status === "rejected" && healthResult.reason instanceof Error ? healthResult.reason.message : "Live actions are temporarily unavailable.";
-        setNotice(`${reason} You can still explore the clearly labeled practice workspace.`);
+        // The persistent, labeled degraded-state banner carries this message.
+        // Avoid duplicating it in the transient notice area where it can be
+        // visually clipped by the command header on smaller viewports.
+        setNotice(null);
       }
     }
     void bootstrap();
     return () => streamRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    const route = routeState(pathname);
+    setActiveNavigation(route.section);
+    setView(route.view);
+  }, [pathname]);
 
   function resetRun(nextView: WorkspaceView = "match") {
     streamRef.current?.close(); setRunId(null); setRunState("idle"); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
@@ -214,6 +245,7 @@ export default function Home() {
 
   function navigate(section: NavigationSection) {
     setActiveNavigation(section);
+    if (pathname !== routeForSection[section]) router.push(routeForSection[section]);
     if (section === "workspace") { setView("match"); window.scrollTo({ top: 0, behavior: "smooth" }); }
     if (section === "applications") { setView("match"); scrollToShortlist(); }
     if (section === "practice") { setView("rehearse"); scrollToWorkspacePanel(); }
@@ -228,7 +260,12 @@ export default function Home() {
       : "Evidence Lab is selected. Its deterministic evidence checks control every claim and export.");
   }
 
+  function explainServiceUnavailable() {
+    setNotice("The live workspace API is unavailable. Demo fixtures are visible only for orientation; imports, live role discovery, rehearsals, approval, and exports are paused until the service reconnects.");
+  }
+
   function startFromHero() {
+    if (!serviceOnline) return explainServiceUnavailable();
     if (selectedIsPractice) {
       setShowLiveFinder(true);
       setNotice("You are currently viewing a practice target. Find a live public role or paste a real job brief to prepare a real application packet.");
@@ -238,11 +275,13 @@ export default function Home() {
   }
 
   function openBlankJobForm() {
+    if (!serviceOnline) return explainServiceUnavailable();
     setManualTitle(""); setManualCompany(""); setManualLocation(""); setManualUrl(""); setManualDescription("");
     setShowJobForm(true);
   }
 
   function adaptSelectedJob() {
+    if (!serviceOnline) return explainServiceUnavailable();
     if (!selectedJob) return openBlankJobForm();
     setManualTitle(selectedJob.title); setManualCompany(selectedJob.company); setManualLocation(selectedJob.location);
     // Example links used by practice fixtures must not be relabeled as an official listing.
@@ -285,11 +324,12 @@ export default function Home() {
 
   function reportActionError(error: unknown, fallback: string) {
     const message = error instanceof Error && error.message ? error.message : fallback;
-    if (/could not reach|HTML error page|unreadable service response|empty response/i.test(message)) setServiceStatus("offline");
+    if (/could not reach|HTML error page|unreadable service response|empty response|API route is missing|workspace API is unavailable/i.test(message)) setServiceStatus("offline");
     setNotice(message);
   }
 
   async function startRehearsal() {
+    if (!serviceOnline) return explainServiceUnavailable();
     if (!selectedJob) return;
     resetRun("rehearse");
     setActiveNavigation("practice");
@@ -331,6 +371,7 @@ export default function Home() {
   }
 
   async function approvePacket() {
+    if (!serviceOnline) return explainServiceUnavailable();
     if (!runId) return;
     try {
       await requestJson<Record<string, unknown>>(`${API}/api/runs/${runId}/approve`, { method: "POST" });
@@ -342,6 +383,7 @@ export default function Home() {
   }
 
   async function exportPacket(format: "docx" | "pdf") {
+    if (!serviceOnline) return explainServiceUnavailable();
     if (!runId) return;
     try {
       const response = await requestFile(`${API}/api/runs/${runId}/export/${format}`);
@@ -373,6 +415,7 @@ export default function Home() {
 
   async function addManualJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!serviceOnline) return explainServiceUnavailable();
     if (manualTitle.trim().length < 2 || manualCompany.trim().length < 2 || manualDescription.trim().length < 20) {
       setNotice("Add a role title, company, and at least a short role description before creating a target.");
       return;
@@ -392,6 +435,7 @@ export default function Home() {
   }
 
   async function discoverPublicRoles(query: string, source: "all" | "remotive" | "arbeitnow") {
+    if (!serviceOnline) return explainServiceUnavailable();
     try {
       const data = await requestJson<SourceResponse>(`${API}/api/jobs/live?query=${encodeURIComponent(query)}&source=${source}`);
       setServiceStatus("online");
@@ -404,6 +448,7 @@ export default function Home() {
   }
 
   async function connectPublicBoard(source: "greenhouse" | "lever", board: string) {
+    if (!serviceOnline) return explainServiceUnavailable();
     try {
       const data = await requestJson<SourceResponse>(`${API}/api/jobs/public-board`, {
         method: "POST",
@@ -419,6 +464,7 @@ export default function Home() {
   }
 
   async function importResume(file: File) {
+    if (!serviceOnline) return explainServiceUnavailable();
     setIsImporting(true);
     try {
       const form = new FormData();
@@ -434,6 +480,7 @@ export default function Home() {
   }
 
   async function analyzeResume() {
+    if (!serviceOnline) return explainServiceUnavailable();
     setIsAnalyzing(true);
     try {
       const data = await requestJson<Candidate | { detail?: string }>(`${API}/api/candidate/normalize`, {
@@ -461,10 +508,10 @@ export default function Home() {
     <aside className="sidebar">
       <div className="sidebar-brand"><div className="mark">h.</div><span>hire<span>swarm</span></span></div>
       <nav className="primary-nav" aria-label="Workspace navigation">
-        <button className={cx("nav-item", activeNavigation === "workspace" && "active")} onClick={() => navigate("workspace")}><NavGlyph type="grid" />Workspace</button>
-        <button className={cx("nav-item", activeNavigation === "applications" && "active")} onClick={() => navigate("applications")}><NavGlyph type="briefcase" />Applications <small>{jobs.length}</small></button>
-        <button className={cx("nav-item", activeNavigation === "practice" && "active")} onClick={() => navigate("practice")}><NavGlyph type="chat" />Practice</button>
-        <button className={cx("nav-item", activeNavigation === "documents" && "active")} onClick={() => navigate("documents")}><NavGlyph type="document" />Documents</button>
+        <Link href="/workspace" className={cx("nav-item", activeNavigation === "workspace" && "active")} onClick={(event) => { event.preventDefault(); navigate("workspace"); }}><NavGlyph type="grid" />Workspace</Link>
+        <Link href="/applications" className={cx("nav-item", activeNavigation === "applications" && "active")} onClick={(event) => { event.preventDefault(); navigate("applications"); }}><NavGlyph type="briefcase" />Applications <small>{jobs.length}</small></Link>
+        <Link href="/practice" className={cx("nav-item", activeNavigation === "practice" && "active")} onClick={(event) => { event.preventDefault(); navigate("practice"); }}><NavGlyph type="chat" />Practice</Link>
+        <Link href="/documents" className={cx("nav-item", activeNavigation === "documents" && "active")} onClick={(event) => { event.preventDefault(); navigate("documents"); }}><NavGlyph type="document" />Documents</Link>
       </nav>
       <div className="sidebar-spacer" />
       <section className="candidate-card"><div className="candidate-avatar">{initials(candidate.name)}</div><div className="candidate-card-copy"><small>YOUR PROFILE</small><b>{candidate.name}</b><span>{candidate.location}</span></div><button onClick={() => setShowIntake(true)} aria-label="Edit candidate profile">⋯</button></section>
@@ -494,12 +541,17 @@ export default function Home() {
             </div>}
           </div>
           <button className="command-action guide-action" onClick={() => setShowGuide(true)} aria-label="Open how HireSwarm works guide"><span className="command-icon">?</span><span className="mobile-command-label">Guide</span><span className="command-copy"><b>Guide</b><small>See the path</small></span></button>
-          <button className="command-action find-action" onClick={() => setShowLiveFinder(true)} aria-label="Find public roles"><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>Find roles</b><small>Public sources</small></span></button>
+          <button className="command-action find-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-label="Find public roles" aria-disabled={!serviceOnline}><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>Find roles</b><small>{serviceOnline ? "Public sources" : "API paused"}</small></span></button>
           <button className="command-action paste-action" onClick={openBlankJobForm} aria-label="Paste a job listing"><span className="command-icon">+</span><span className="mobile-command-label">Paste</span><span className="command-copy"><b>Paste role</b><small>Add your listing</small></span></button>
           <button className="profile-button command-profile" onClick={() => setShowIntake(true)} aria-label="Open your profile"><span>{initials(candidate.name)}</span><i>Profile</i><small className="mobile-command-label">You</small></button>
         </div>
       </header>
       <div className="page-wrap">
+        {serviceStatus === "offline" && <section className="service-outage" role="alert" aria-labelledby="service-outage-title">
+          <div className="service-outage-icon" aria-hidden="true">!</div>
+          <div><p className="section-kicker">LIVE WORKSPACE PAUSED</p><h2 id="service-outage-title">We can’t reach your private workspace right now.</h2><p>Your visible profile and practice target are orientation-only fixtures. No import, role search, rehearsal, approval, or export will be represented as completed until the API reconnects.</p></div>
+          <button type="button" onClick={() => void checkService(true)} aria-label="Retry workspace connection">Retry connection</button>
+        </section>}
         {notice && <div className="notice" role="status" aria-live="polite"><span>i</span><p>{notice}</p><button onClick={() => setNotice(null)} aria-label="Dismiss notice">Dismiss</button></div>}
         <section className="command-hero" aria-labelledby="workspace-title">
           <div className="command-hero-copy">
@@ -507,7 +559,7 @@ export default function Home() {
             <h1 id="workspace-title">Make your real work <em>impossible to miss.</em></h1>
             <p className="command-hero-lede">Hi {candidateFirstName}. HireSwarm turns your evidence into a focused, reviewable case for one role — without inventing a thing.</p>
             <div className="hero-cta-row">
-              <button className="hero-primary" disabled={runState === "running"} onClick={startFromHero}><span className="hero-primary-icon">{runState === "running" ? "···" : selectedIsPractice ? "↗" : "▶"}</span><span><b>{runState === "running" ? "Rehearsal in progress" : selectedIsPractice ? "Choose a real role" : "Run focused rehearsal"}</b><small>{selectedIsPractice ? "Public source or your own listing" : "Map proof before you edit"}</small></span></button>
+              <button className="hero-primary" disabled={runState === "running" || !serviceOnline} onClick={startFromHero} aria-describedby={!serviceOnline ? "service-outage-title" : undefined}><span className="hero-primary-icon">{runState === "running" ? "···" : selectedIsPractice ? "↗" : "▶"}</span><span><b>{runState === "running" ? "Rehearsal in progress" : selectedIsPractice ? "Choose a real role" : "Run focused rehearsal"}</b><small>{selectedIsPractice ? "Public source or your own listing" : "Map proof before you edit"}</small></span></button>
               <button className="hero-secondary" onClick={() => setShowGuide(true)}><span>01–04</span><span><b>See the four-step path</b><small>CV → role → proof → review</small></span><i>→</i></button>
             </div>
             <div className="hero-stat-row" aria-label={`${candidate.evidence.length} evidence notes, ${selectedIsPractice ? "practice target" : "real target"}, and applicant approval required`}>
@@ -519,22 +571,22 @@ export default function Home() {
         <section className="launchpad-card" aria-labelledby="launchpad-title">
           <div className="launchpad-intro"><p className="section-kicker">START HERE</p><h2 id="launchpad-title">Bring one honest input.<br />We’ll make it usable.</h2><p>{selectedIsPractice ? "This workspace is showing safe sample data. Use any path below to move into your own application." : "Your selected target is ready. Check the source, then start the evidence rehearsal when it feels right."}</p></div>
           <div className="launchpad-paths">
-            <button className="launch-path cv-path" onClick={() => setShowIntake(true)}><span className="path-top"><i>01</i><em>CV</em></span><b>Import your CV</b><small>{candidate.evidence.length} evidence notes ready</small><span className="path-arrow">→</span></button>
-            <button className="launch-path source-path" onClick={() => setShowLiveFinder(true)}><span className="path-top"><i>02</i><em>↗</em></span><b>Find public roles</b><small>Remotive, Arbeitnow, or ATS</small><span className="path-arrow">→</span></button>
-            <button className="launch-path paste-path" onClick={openBlankJobForm}><span className="path-top"><i>03</i><em>+</em></span><b>Paste a listing</b><small>Keep the official link with it</small><span className="path-arrow">→</span></button>
-            <button className="launch-path practice-path" onClick={() => void startRehearsal()}><span className="path-top"><i>04</i><em>◎</em></span><b>Explore safely</b><small>Try the practice flow first</small><span className="path-arrow">→</span></button>
+            <button className="launch-path cv-path" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}><span className="path-top"><i>01</i><em>CV</em></span><b>{serviceOnline ? "Import your CV" : "CV import paused"}</b><small>{serviceOnline ? `${candidate.evidence.length} evidence notes ready` : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path source-path" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}><span className="path-top"><i>02</i><em>↗</em></span><b>Find public roles</b><small>{serviceOnline ? "Remotive, Arbeitnow, or ATS" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path paste-path" onClick={openBlankJobForm} aria-disabled={!serviceOnline}><span className="path-top"><i>03</i><em>+</em></span><b>Paste a listing</b><small>{serviceOnline ? "Keep the official link with it" : "Available when API reconnects"}</small><span className="path-arrow">→</span></button>
+            <button className="launch-path practice-path" onClick={() => void startRehearsal()} disabled={!serviceOnline}><span className="path-top"><i>04</i><em>◎</em></span><b>Explore safely</b><small>{serviceOnline ? "Try the practice flow first" : "Rehearsal is paused"}</small><span className="path-arrow">→</span></button>
           </div>
         </section>
         <section className="progress-nav" aria-label="Application workflow">{views.map((item, index) => { const done = (item.id === "match" && Boolean(market)) || (item.id === "rehearse" && turns.length > 0) || (item.id === "tailor" && patches.length > 0) || (item.id === "review" && ["awaiting_approval", "approved"].includes(runState)); return <button key={item.id} className={cx("progress-step", view === item.id && "active", done && "done")} onClick={() => { setView(item.id); setActiveNavigation(item.id === "match" ? "workspace" : item.id === "rehearse" ? "practice" : "documents"); scrollToWorkspacePanel(); }}><span>{done ? "✓" : item.number}</span><div><b>{item.label}</b><small>{item.hint}</small></div>{index < views.length - 1 && <i />}</button>; })}</section>
         <div className="workspace-grid"><section className="main-column">
           <article className="target-card"><div className="target-card-top"><div className="target-label"><span>{sourceLabel(selectedJob?.origin || "demo_fixture")}</span><b>Target brief</b></div><div className="target-card-actions">{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="text-action" onClick={() => openOfficialListing(selectedJob.url)}>Open source ↗</button>}<button className="text-action" onClick={adaptSelectedJob}>Adapt this target</button></div></div><div className="target-body"><div className="company-seal">{selectedJob?.company.split(" ").map((word) => word[0]).join("").slice(0, 2)}</div><div className="target-copy"><h2>{selectedJob?.title}</h2><p>{selectedJob?.company} <i>·</i> {selectedJob?.location} <i>·</i> {selectedJob?.type}</p><small className="source-line">{sourceDetail(selectedJob)} · updated {selectedJob?.posted || "not disclosed"}</small><div className="role-tags">{selectedJob?.must_have.slice(0, 4).map((skill) => <span key={skill}>{skill}</span>)}</div></div><div className="fit-summary"><div className="score-orbit" style={{ "--score": `${market?.score || 0}%` } as React.CSSProperties}><span>{market?.score || "—"}<small>{market ? "%" : "FIT"}</small></span></div><div><small>ROLE ALIGNMENT</small><b>{market ? "Evidence mapped" : "Ready to assess"}</b><p>{market ? `${directMatches} direct strengths found` : "Built from your verified work"}</p></div></div></div></article>
           <section ref={workspacePanelRef} className="workspace-panel"><div className="panel-topline"><div><p className="kicker">{views.find((item) => item.id === view)?.number} / {views.find((item) => item.id === view)?.label?.toUpperCase()}</p><h2>{panelHeading(view, runState)}</h2></div><div className="live-context"><span className={cx("tiny-status", runState === "running" && "is-live")} />{activeAgent}</div></div>
-            {view === "match" && <MatchPanel selectedJob={selectedJob} market={market} onStart={() => void startRehearsal()} runState={runState} />}
-            {view === "rehearse" && <RehearsalPanel turns={turns} currentTurn={currentTurn} runState={runState} onStart={() => void startRehearsal()} />}
-            {view === "tailor" && <TailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} />}
-            {view === "review" && <ReviewPanel runState={runState} patches={patches} gaps={market?.gaps || []} readiness={exportReadiness} selectedJob={selectedJob} onApprove={() => void approvePacket()} onExport={exportPacket} onOpenOfficial={openOfficialListing} />}
+            {view === "match" && <MatchPanel selectedJob={selectedJob} market={market} onStart={() => void startRehearsal()} runState={runState} canRun={serviceOnline} />}
+            {view === "rehearse" && <RehearsalPanel turns={turns} currentTurn={currentTurn} runState={runState} onStart={() => void startRehearsal()} canRun={serviceOnline} />}
+            {view === "tailor" && <TailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} canRun={serviceOnline} />}
+            {view === "review" && <ReviewPanel runState={runState} patches={patches} gaps={market?.gaps || []} readiness={exportReadiness} selectedJob={selectedJob} onApprove={() => void approvePacket()} onExport={exportPacket} onOpenOfficial={openOfficialListing} serviceOnline={serviceOnline} />}
           </section>
-          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR SHORTLIST</p><h2>Worth a closer look</h2></div><div className="shortlist-actions"><button className="text-action" onClick={() => setShowLiveFinder(true)}>Find live roles</button><button className="text-action" onClick={openBlankJobForm}>Paste another role</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} onClick={() => { setSelectedJobId(job.id); setActiveNavigation("applications"); resetRun("match"); }}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{job.must_have.slice(0, 3).join(" · ")}</small></div><i>↗</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
+          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR SHORTLIST</p><h2>Worth a closer look</h2></div><div className="shortlist-actions"><button className="text-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-disabled={!serviceOnline}>Find live roles</button><button className="text-action" onClick={openBlankJobForm} aria-disabled={!serviceOnline}>Paste another role</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} onClick={() => { setSelectedJobId(job.id); setActiveNavigation("applications"); resetRun("match"); }}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{job.must_have.slice(0, 3).join(" · ")}</small></div><i>↗</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
         </section>
         <aside className="insight-column"><section className="evidence-card"><div className="section-heading"><div><p className="kicker">EVIDENCE VAULT</p><h2>What you can prove</h2></div><span className="count-pill">{candidate.evidence.length}</span></div><div className="evidence-meter"><div className="meter-number"><b>{market ? coverage : "—"}</b><span>{market ? "%" : "ready"}</span></div><div className="meter-copy"><b>Coverage, not confidence.</b><p>{market ? "Direct proof is separated from adjacent experience." : "Run the brief to see role-specific evidence coverage."}</p></div></div><EvidenceGroup label="Direct strengths" tone="mint" items={market ? market.verified_strengths.map((item) => item.skill) : evidencePreviewSkills} /><EvidenceGroup label="Adjacent experience" tone="amber" items={market ? market.adjacent_strengths.map((item) => item.skill) : []} /><EvidenceGroup label="Keep visible" tone="coral" items={market ? market.gaps.map((item) => item.skill) : []} /></section>
           <section className="proof-card"><p className="kicker">TODAY&apos;S PROOF</p><blockquote>“{proofItem?.source_text || "Import or write a literal work statement to begin."}”</blockquote><div><span>Evidence {proofItem?.evidence_id || "—"}</span><b>{proofItem ? "Verified source" : "Needs source"}</b></div></section>
@@ -542,10 +594,10 @@ export default function Home() {
         </aside></div>
       </div>
     </div>
-    {showIntake && <CandidateModal candidate={candidate} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} />}
+    {showIntake && <CandidateModal candidate={candidate} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} serviceOnline={serviceOnline} />}
     {showJobForm && <JobModal title={manualTitle} company={manualCompany} location={manualLocation} url={manualUrl} description={manualDescription} onTitle={setManualTitle} onCompany={setManualCompany} onLocation={setManualLocation} onUrl={setManualUrl} onDescription={setManualDescription} onClose={() => setShowJobForm(false)} onSubmit={(event) => void addManualJob(event)} />}
     {showLiveFinder && <LiveRolesModal onClose={() => setShowLiveFinder(false)} onDiscover={discoverPublicRoles} onConnect={connectPublicBoard} />}
-    {showGuide && <HowItWorksModal onClose={() => setShowGuide(false)} onOpenProfile={() => { setShowGuide(false); setShowIntake(true); }} onOpenLive={() => { setShowGuide(false); setShowLiveFinder(true); }} onOpenManual={() => { setShowGuide(false); openBlankJobForm(); }} />}
+    {showGuide && <HowItWorksModal onClose={() => setShowGuide(false)} onOpenProfile={() => { setShowGuide(false); setShowIntake(true); }} onOpenLive={() => { if (!serviceOnline) return explainServiceUnavailable(); setShowGuide(false); setShowLiveFinder(true); }} onOpenManual={() => { setShowGuide(false); openBlankJobForm(); }} />}
   </main>;
 }
 
@@ -557,7 +609,7 @@ function HeroScene({ candidateName, evidenceCount, job, score, serviceStatus }: 
     <article className="scene-card scene-evidence"><span className="scene-card-label"><i>✓</i> VERIFIED INPUT</span><b>{evidenceCount} proof notes</b><p>Only sourced work enters the flow.</p><div className="mini-bars"><i /><i /><i /></div></article>
     <article className="scene-core"><span className="core-halo" /><span className="core-orb">{scoreLabel}<small>{score === null ? "FIT" : "MAPPED"}</small></span><div><small>YOUR CASE</small><b>Evidence, not hype.</b></div></article>
     <article className="scene-card scene-role"><span className="scene-card-label"><i>↗</i> SELECTED ROLE</span><b>{job?.title || "Choose a target"}</b><p>{job?.company || "Bring in a real listing"}</p><span className="scene-chip">{job?.origin === "demo_fixture" ? "Practice target" : "Applicant-controlled"}</span></article>
-    <article className="scene-person"><span>{initials(candidateName)}</span><div><small>APPLICANT</small><b>{candidateName}</b><p>{serviceStatus === "online" ? "Workspace connected" : serviceStatus === "checking" ? "Connecting workspace" : "Practice stays available"}</p></div></article>
+    <article className="scene-person"><span>{initials(candidateName)}</span><div><small>APPLICANT</small><b>{candidateName}</b><p>{serviceStatus === "online" ? "Workspace connected" : serviceStatus === "checking" ? "Connecting workspace" : "Preview only · API unavailable"}</p></div></article>
   </div>;
 }
 
@@ -571,33 +623,33 @@ function SignalOrb({ score, runState }: { score: number | null; runState: RunSta
 
 function panelHeading(view: WorkspaceView, state: RunState) { if (view === "match") return "A practical read on this role"; if (view === "rehearse") return state === "running" ? "The interview is being rehearsed" : "Practice the questions that matter"; if (view === "tailor") return "Edit for relevance, not invention"; return state === "approved" ? "Your packet is ready to take with you" : "You make the final call"; }
 
-function MatchPanel({ selectedJob, market, onStart, runState }: { selectedJob?: Job; market: MarketReport | null; onStart: () => void; runState: RunState }) {
+function MatchPanel({ selectedJob, market, onStart, runState, canRun }: { selectedJob?: Job; market: MarketReport | null; onStart: () => void; runState: RunState; canRun: boolean }) {
   const requirementRows = selectedJob?.must_have || [];
-  return <div className="match-layout"><div className="match-story"><p>{selectedJob?.description}</p><div className="story-callout"><span>✦</span><div><b>Start from the work you&apos;ve actually done.</b><p>HireSwarm maps each requirement to a source in your profile, flags the difference between direct and adjacent experience, then keeps true gaps visible.</p></div></div><button className="inline-primary" onClick={onStart} disabled={runState === "running"}>{runState === "running" ? "Mapping evidence…" : "Assess this fit"} <span>→</span></button></div><div className="requirements-list"><div className="requirement-header"><span>ROLE REQUIREMENTS</span><small>{market ? "mapped to evidence" : "to be assessed"}</small></div>{requirementRows.map((skill, index) => { const direct = market?.verified_strengths.some((item) => item.skill === skill); const adjacent = market?.adjacent_strengths.some((item) => item.skill === skill); return <div className="requirement-row" key={skill}><span className={cx("requirement-icon", direct && "direct", adjacent && "adjacent")}>{direct ? "✓" : adjacent ? "~" : String(index + 1).padStart(2, "0")}</span><div><b>{skill}</b><p>{direct ? "Direct evidence available" : adjacent ? "Related evidence — confirm the boundary" : "No evidence assessed yet"}</p></div></div>; })}</div></div>;
+  return <div className="match-layout"><div className="match-story"><p>{selectedJob?.description}</p><div className="story-callout"><span>✦</span><div><b>Start from the work you&apos;ve actually done.</b><p>HireSwarm maps each requirement to a source in your profile, flags the difference between direct and adjacent experience, then keeps true gaps visible.</p></div></div><button className="inline-primary" onClick={onStart} disabled={runState === "running" || !canRun}>{runState === "running" ? "Mapping evidence…" : canRun ? "Assess this fit" : "Assessment paused"} <span>→</span></button></div><div className="requirements-list"><div className="requirement-header"><span>ROLE REQUIREMENTS</span><small>{market ? "mapped to evidence" : "to be assessed"}</small></div>{requirementRows.map((skill, index) => { const direct = market?.verified_strengths.some((item) => item.skill === skill); const adjacent = market?.adjacent_strengths.some((item) => item.skill === skill); return <div className="requirement-row" key={skill}><span className={cx("requirement-icon", direct && "direct", adjacent && "adjacent")}>{direct ? "✓" : adjacent ? "~" : String(index + 1).padStart(2, "0")}</span><div><b>{skill}</b><p>{direct ? "Direct evidence available" : adjacent ? "Related evidence — confirm the boundary" : "No evidence assessed yet"}</p></div></div>; })}</div></div>;
 }
 
-function RehearsalPanel({ turns, currentTurn, runState, onStart }: { turns: Turn[]; currentTurn?: Turn; runState: RunState; onStart: () => void }) {
-  if (!turns.length && runState !== "running") return <div className="rehearsal-empty"><div className="conversation-preview"><div className="speaker-card hr"><span>HR</span><p>“Tell me about the proof behind your most relevant work.”</p></div><div className="speaker-card candidate"><span>YOU</span><p>“I&apos;ll answer from the evidence already in my profile.”</p></div></div><div><h3>A calm rehearsal, not a performance.</h3><p>We test only the requirements that matter to this role. If the evidence is missing, we name the gap instead of inventing an answer.</p><button className="inline-primary" onClick={onStart}>Begin interview rehearsal <span>→</span></button></div></div>;
+function RehearsalPanel({ turns, currentTurn, runState, onStart, canRun }: { turns: Turn[]; currentTurn?: Turn; runState: RunState; onStart: () => void; canRun: boolean }) {
+  if (!turns.length && runState !== "running") return <div className="rehearsal-empty"><div className="conversation-preview"><div className="speaker-card hr"><span>HR</span><p>“Tell me about the proof behind your most relevant work.”</p></div><div className="speaker-card candidate"><span>YOU</span><p>“I&apos;ll answer from the evidence already in my profile.”</p></div></div><div><h3>A calm rehearsal, not a performance.</h3><p>We test only the requirements that matter to this role. If the evidence is missing, we name the gap instead of inventing an answer.</p><button className="inline-primary" onClick={onStart} disabled={!canRun}>{canRun ? "Begin interview rehearsal" : "Rehearsal paused"} <span>→</span></button></div></div>;
   return <div className="rehearsal-wrap"><div className="interview-status"><div><span className={cx("record-dot", runState === "running" && "recording")} /> {runState === "running" ? "Rehearsal in progress" : "Interview notes"}</div><b>{turns.length}/4 prompts reviewed</b></div><div className="conversation-list">{turns.map((turn) => <article className="conversation-turn" key={turn.round}><div className="turn-marker">{String(turn.round).padStart(2, "0")}</div><div className="turn-content"><div className="question-bubble"><span>HIRING PANEL · {turn.requirement}</span><p>{turn.question || "Preparing the next role-specific question…"}</p></div>{turn.answer && <div className="answer-bubble"><span>YOUR TWIN · <b className={cx("status-word", turn.status?.toLowerCase())}>{turn.status}</b></span><p>{turn.answer}</p>{turn.evidence_ids?.length ? <div className="source-pills">{turn.evidence_ids.map((id) => <i key={id}>{id}</i>)}</div> : null}</div>}{turn.verdict && <div className={cx("verdict", turn.status?.toLowerCase())}>{turn.verdict}</div>}</div></article>)}</div>{runState === "running" && <div className="now-thinking"><span /><p>{currentTurn?.question ? "Checking the answer against the evidence ledger…" : "Preparing the next interview prompt…"}</p></div>}</div>;
 }
 
-function TailorPanel({ patches, coverLetter, coverLetterEvidenceIds, showCoverLetter, onToggleCoverLetter, onStart }: { patches: Patch[]; coverLetter: string; coverLetterEvidenceIds: string[]; showCoverLetter: boolean; onToggleCoverLetter: () => void; onStart: () => void }) {
-  if (!patches.length) return <div className="tailor-empty"><div className="paper-stack"><span /><span /><article><small>YOUR RESUME</small><b>Relevant work, clearly stated.</b><p>The strongest application is specific about what you did — and careful about what you did not do.</p></article></div><div><h3>Your resume will stay yours.</h3><p>Once the rehearsal is complete, HireSwarm suggests small, source-linked changes. You see every original sentence before deciding what to keep.</p><button className="inline-primary" onClick={onStart}>Run the evidence check <span>→</span></button></div></div>;
+function TailorPanel({ patches, coverLetter, coverLetterEvidenceIds, showCoverLetter, onToggleCoverLetter, onStart, canRun }: { patches: Patch[]; coverLetter: string; coverLetterEvidenceIds: string[]; showCoverLetter: boolean; onToggleCoverLetter: () => void; onStart: () => void; canRun: boolean }) {
+  if (!patches.length) return <div className="tailor-empty"><div className="paper-stack"><span /><span /><article><small>YOUR RESUME</small><b>Relevant work, clearly stated.</b><p>The strongest application is specific about what you did — and careful about what you did not do.</p></article></div><div><h3>Your resume will stay yours.</h3><p>Once the rehearsal is complete, HireSwarm suggests small, source-linked changes. You see every original sentence before deciding what to keep.</p><button className="inline-primary" onClick={onStart} disabled={!canRun}>{canRun ? "Run the evidence check" : "Evidence check paused"} <span>→</span></button></div></div>;
   if (showCoverLetter) return <div className="letter-view"><div className="letter-toolbar"><div><span>APPLICATION NOTE</span><b>Draft cover letter</b></div><button className="text-action" onClick={onToggleCoverLetter}>Back to revisions</button></div>{coverLetterEvidenceIds.length > 0 && <div className="letter-evidence"><span>Bound to evidence</span>{coverLetterEvidenceIds.map((id) => <i key={id}>{id}</i>)}</div>}<pre>{coverLetter}</pre></div>;
   return <div className="revision-wrap"><div className="revision-toolbar"><div><span>{patches.length} suggested changes</span><p>Each revision carries its evidence trail.</p></div><button className="outline-action small" onClick={onToggleCoverLetter} disabled={!coverLetter}>Read cover letter</button></div><div className="revision-list">{patches.map((patch, index) => <article className="revision" key={`${patch.original}-${index}`}><div className="revision-number">{String(index + 1).padStart(2, "0")}</div><div className="revision-body"><div className="revision-section">{patch.section}</div>{patch.proposed.trim() === patch.original.trim() ? <><p className="before source-only">SOURCE SENTENCE</p><p className="after">Keep this exact wording; prioritize it in this section for the target role.</p></> : <><p className="before"><s>{patch.original}</s></p><p className="after">{patch.proposed}</p></>}<div className="revision-meta"><span>Backed by {patch.evidence_ids.map((id) => <i key={id}>{id}</i>)}</span><em>{patch.reason}</em></div></div></article>)}</div></div>;
 }
 
-function ReviewPanel({ runState, patches, gaps, readiness, selectedJob, onApprove, onExport, onOpenOfficial }: { runState: RunState; patches: Patch[]; gaps: { skill: string; severity: string }[]; readiness: ExportReadiness | null; selectedJob?: Job; onApprove: () => void; onExport: (format: "docx" | "pdf") => void; onOpenOfficial: (url?: string) => void }) {
+function ReviewPanel({ runState, patches, gaps, readiness, selectedJob, onApprove, onExport, onOpenOfficial, serviceOnline }: { runState: RunState; patches: Patch[]; gaps: { skill: string; severity: string }[]; readiness: ExportReadiness | null; selectedJob?: Job; onApprove: () => void; onExport: (format: "docx" | "pdf") => void; onOpenOfficial: (url?: string) => void; serviceOnline: boolean }) {
   const ready = runState === "awaiting_approval" || runState === "approved";
   const extractionPassed = readiness?.checks.find((item) => item.label === "PDF text round-trip")?.passed ?? false;
-  return <div className="review-layout"><div className="review-lead"><div className={cx("review-seal", runState === "approved" && "approved")}>{runState === "approved" ? "✓" : "01"}</div><div><h3>{runState === "approved" ? "You're ready to apply on your terms." : ready ? "A final read is all that's left." : "The application packet will appear here."}</h3><p>{runState === "approved" ? "Your verified revisions and cover letter are ready to take with you. HireSwarm will never submit an application for you." : ready ? "Check the rewritten sentences, acknowledge the gaps that remain, then approve the packet when it sounds like you." : "Complete the rehearsal and tailoring steps to create a document you can review."}</p></div></div><div className="review-checks"><ReviewCheck complete={patches.length > 0} label={`${patches.length || "No"} evidence-linked resume revisions`} /><ReviewCheck complete label={gaps.length ? `${gaps.length} growth area${gaps.length > 1 ? "s" : ""} kept visible` : "No unmet role requirements detected"} /><ReviewCheck complete={Boolean(readiness?.passed && extractionPassed)} label={readiness?.passed ? "One-column export passed a real PDF text check" : "Export readiness will be checked before approval"} /><ReviewCheck complete={runState === "approved"} label={runState === "approved" ? "Your approval has been recorded" : "Your approval is still required"} /></div>{readiness && <div className="readiness-note"><span>{readiness.passed ? "✓" : "!"}</span><p><b>Document QA</b> · {readiness.verified_bullets} verified bullet{readiness.verified_bullets === 1 ? "" : "s"}; {readiness.extracted_characters} characters read back from the generated PDF.</p></div>}<div className="review-actions">{runState === "awaiting_approval" && <button className="approve-action" onClick={onApprove}>I&apos;ve reviewed this packet <span>→</span></button>}{runState === "approved" && <><button className="approve-action export" onClick={() => onExport("docx")}>Download .docx <span>↓</span></button><button className="outline-action" onClick={() => onExport("pdf")}>Printable PDF <span>↓</span></button>{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="outline-action" onClick={() => onOpenOfficial(selectedJob.url)}>Open official listing ↗</button>}</>} {!ready && <span className="locked-action">Complete a rehearsal to unlock review</span>}</div></div>;
+  return <div className="review-layout"><div className="review-lead"><div className={cx("review-seal", runState === "approved" && "approved")}>{runState === "approved" ? "✓" : "01"}</div><div><h3>{runState === "approved" ? "You're ready to apply on your terms." : ready ? "A final read is all that's left." : "The application packet will appear here."}</h3><p>{runState === "approved" ? "Your verified revisions and cover letter are ready to take with you. HireSwarm will never submit an application for you." : ready ? "Check the rewritten sentences, acknowledge the gaps that remain, then approve the packet when it sounds like you." : "Complete the rehearsal and tailoring steps to create a document you can review."}</p></div></div><div className="review-checks"><ReviewCheck complete={patches.length > 0} label={`${patches.length || "No"} evidence-linked resume revisions`} /><ReviewCheck complete label={gaps.length ? `${gaps.length} growth area${gaps.length > 1 ? "s" : ""} kept visible` : "No unmet role requirements detected"} /><ReviewCheck complete={Boolean(readiness?.passed && extractionPassed)} label={readiness?.passed ? "One-column export passed a real PDF text check" : "Export readiness will be checked before approval"} /><ReviewCheck complete={runState === "approved"} label={runState === "approved" ? "Your approval has been recorded" : "Your approval is still required"} /></div>{readiness && <div className="readiness-note"><span>{readiness.passed ? "✓" : "!"}</span><p><b>Document QA</b> · {readiness.verified_bullets} verified bullet{readiness.verified_bullets === 1 ? "" : "s"}; {readiness.extracted_characters} characters read back from the generated PDF.</p></div>}<div className="review-actions">{runState === "awaiting_approval" && <button className="approve-action" onClick={onApprove} disabled={!serviceOnline}>{serviceOnline ? "I've reviewed this packet" : "Approval paused"} <span>→</span></button>}{runState === "approved" && <><button className="approve-action export" onClick={() => onExport("docx")} disabled={!serviceOnline}>Download .docx <span>↓</span></button><button className="outline-action" onClick={() => onExport("pdf")} disabled={!serviceOnline}>Printable PDF <span>↓</span></button>{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="outline-action" onClick={() => onOpenOfficial(selectedJob.url)}>Open official listing ↗</button>}</>} {!ready && <span className="locked-action">Complete a rehearsal to unlock review</span>}</div></div>;
 }
 
 function ReviewCheck({ complete, label }: { complete: boolean; label: string }) { return <div className={cx("review-check", complete && "complete")}><span>{complete ? "✓" : "○"}</span><p>{label}</p></div>; }
 function EvidenceGroup({ label, tone, items }: { label: string; tone: "mint" | "amber" | "coral"; items: string[] }) { return <section className={cx("evidence-group", tone)}><div><span /> <b>{label}</b><small>{items.length}</small></div><p>{items.slice(0, 3).join(" · ") || "No evidence yet"}</p></section>; }
 
-function CandidateModal({ candidate, onClose, onChange, onRestore, onAnalyze, onUpload, isAnalyzing, isImporting }: { candidate: Candidate; onClose: () => void; onChange: (field: keyof Candidate, value: string) => void; onRestore: () => void; onAnalyze: () => void; onUpload: (file: File) => void; isAnalyzing: boolean; isImporting: boolean }) {
-  return <ModalShell onClose={onClose} eyebrow="YOUR PROFILE" title="Keep your evidence current."><p className="modal-copy">Import a real PDF, DOCX, or TXT CV, or paste text below. The document is parsed in memory for this session; HireSwarm does not retain the original file.</p><label className="upload-drop"><span>IMPORT CV</span><input type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) onUpload(file); event.currentTarget.value = ""; }} /><b>{isImporting ? "Reading your document…" : "Choose a PDF, DOCX, or TXT file"}</b><small>Text-based PDFs only · 6 MB maximum · source file is not stored</small></label><label>Name<input value={candidate.name} onChange={(event) => onChange("name", event.target.value)} /></label><label>Professional headline<input value={candidate.headline} onChange={(event) => onChange("headline", event.target.value)} /></label><label>Resume text<textarea rows={8} value={candidate.resume_text} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange("resume_text", event.target.value)} /></label><div className="modal-evidence"><b>{candidate.evidence.length} evidence notes protected</b><span>We only promote a statement after it has a source.</span></div><div className="modal-actions"><button className="text-action" onClick={onRestore}>Restore practice profile</button><div><button className="outline-action" onClick={onAnalyze} disabled={isAnalyzing || isImporting}>{isAnalyzing ? "Reading resume…" : "Refresh evidence"}</button><button className="primary-action small" onClick={onClose}>Save changes</button></div></div></ModalShell>;
+function CandidateModal({ candidate, onClose, onChange, onRestore, onAnalyze, onUpload, isAnalyzing, isImporting, serviceOnline }: { candidate: Candidate; onClose: () => void; onChange: (field: keyof Candidate, value: string) => void; onRestore: () => void; onAnalyze: () => void; onUpload: (file: File) => void; isAnalyzing: boolean; isImporting: boolean; serviceOnline: boolean }) {
+  return <ModalShell onClose={onClose} eyebrow="YOUR PROFILE" title="Keep your evidence current."><p className="modal-copy">Import a real PDF, DOCX, or TXT CV, or paste text below. The document is parsed in memory for this session; HireSwarm does not retain the original file.</p>{!serviceOnline && <p className="modal-service-note" role="status">The API is offline. You may review or edit this local draft, but importing and refreshing evidence are paused.</p>}<label className="upload-drop"><span>IMPORT CV</span><input type="file" disabled={!serviceOnline} accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) onUpload(file); event.currentTarget.value = ""; }} /><b>{isImporting ? "Reading your document…" : serviceOnline ? "Choose a PDF, DOCX, or TXT file" : "Import paused while offline"}</b><small>Text-based PDFs only · 6 MB maximum · source file is not stored</small></label><label>Name<input value={candidate.name} onChange={(event) => onChange("name", event.target.value)} /></label><label>Professional headline<input value={candidate.headline} onChange={(event) => onChange("headline", event.target.value)} /></label><label>Resume text<textarea rows={8} value={candidate.resume_text} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange("resume_text", event.target.value)} /></label><div className="modal-evidence"><b>{candidate.evidence.length} evidence notes protected</b><span>We only promote a statement after it has a source.</span></div><div className="modal-actions"><button className="text-action" onClick={onRestore}>Restore practice profile</button><div><button className="outline-action" onClick={onAnalyze} disabled={!serviceOnline || isAnalyzing || isImporting}>{isAnalyzing ? "Reading resume…" : "Refresh evidence"}</button><button className="primary-action small" onClick={onClose}>Save changes</button></div></div></ModalShell>;
 }
 
 function JobModal({ title, company, location, url, description, onTitle, onCompany, onLocation, onUrl, onDescription, onClose, onSubmit }: { title: string; company: string; location: string; url: string; description: string; onTitle: (value: string) => void; onCompany: (value: string) => void; onLocation: (value: string) => void; onUrl: (value: string) => void; onDescription: (value: string) => void; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {

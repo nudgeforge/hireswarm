@@ -325,3 +325,225 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .service-outage h2 { font-size: 15px; }
   .service-outage button { grid-column: 2; justify-self: start; }
 }
+
+/* First-run orientation: clear demo boundaries, a visible setup sequence, and
+   useful outcomes without turning the workspace into a generic dashboard. */
+.candidate-card.is-demo {
+  margin-inline: 3px;
+  padding-inline: 6px;
+  border: 1px solid rgba(255, 200, 111, .23);
+  border-radius: 14px;
+  background: rgba(255, 187, 78, .07);
+}
+.candidate-card.is-demo .candidate-avatar { filter: saturate(.82); }
+.candidate-card.is-demo .candidate-card-copy small { color: #ffd28a; }
+
+.demo-workspace-banner {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 199, 108, .46);
+  border-radius: 17px;
+  color: #ffe4b4;
+  background: linear-gradient(110deg, rgba(106, 69, 28, .71), rgba(65, 45, 38, .79));
+  box-shadow: 0 13px 28px rgba(0, 0, 0, .18), inset 0 1px rgba(255,255,255,.08);
+}
+.demo-banner-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 224, 170, .57);
+  border-radius: 12px;
+  color: #573813;
+  background: linear-gradient(145deg, #ffe3a5, #f0b970);
+  box-shadow: inset 0 1px rgba(255,255,255,.74), 0 4px 0 rgba(117,72,24,.72);
+  font-size: 20px;
+  font-weight: 900;
+}
+.demo-workspace-banner p {
+  margin: 0 0 3px;
+  color: #ffd390;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .16em;
+}
+.demo-workspace-banner h2 {
+  margin: 0;
+  color: #fff5df;
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 760;
+  letter-spacing: -.025em;
+}
+.demo-workspace-banner div > span {
+  display: block;
+  max-width: 835px;
+  margin-top: 4px;
+  color: #f0d4a4;
+  font-size: 11px;
+  line-height: 1.48;
+}
+.demo-workspace-banner .outline-action { min-height: 36px; white-space: nowrap; }
+
+.onboarding-card .launchpad-intro { align-self: start; }
+.onboarding-card .launch-path { min-height: 166px; }
+.onboarding-card .launch-path:first-child {
+  border-color: rgba(134, 234, 209, .43);
+  background: linear-gradient(145deg, rgba(62, 151, 126, .29), rgba(24, 66, 80, .43));
+}
+.onboarding-card .launch-path:first-child b { color: #dffff4; }
+.outcomes-card {
+  display: grid;
+  grid-template-columns: minmax(240px, .76fr) minmax(0, 1.24fr);
+  gap: 28px;
+  align-items: center;
+  margin: 0 0 25px;
+  padding: 23px 26px;
+  border: 1px solid rgba(151, 210, 239, .14);
+  border-radius: 22px;
+  background: linear-gradient(122deg, rgba(19, 50, 74, .72), rgba(11, 31, 53, .66));
+  box-shadow: var(--card-shadow);
+}
+.outcomes-card h2 {
+  max-width: 370px;
+  margin: 0;
+  color: #f2f9ff;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: -.045em;
+  line-height: 1.08;
+}
+.outcomes-card > div > p:last-child {
+  max-width: 395px;
+  margin: 9px 0 0;
+  color: #94acc1;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.outcomes-card ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.outcomes-card li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(157, 213, 241, .12);
+  border-radius: 13px;
+  background: rgba(44, 87, 119, .17);
+}
+.outcomes-card li > span {
+  flex: 0 0 auto;
+  color: #83e6cc;
+  font-size: 9px;
+  font-weight: 850;
+}
+.outcomes-card li p { min-width: 0; margin: 0; }
+.outcomes-card li b { display: block; color: #edf8ff; font-size: 11px; }
+.outcomes-card li small { display: block; margin-top: 3px; color: #8ea8bd; font-size: 9px; line-height: 1.36; }
+
+.evidence-explainer, .shortlist-helper {
+  max-width: 360px;
+  margin: 7px 0 0;
+  color: #91aabc;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.47;
+}
+.shortlist-helper { max-width: 460px; }
+.fit-prerequisite {
+  margin: 10px 0 0;
+  color: #f0cf94;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.job-tile { grid-template-columns: 26px minmax(0, 1fr) auto; }
+.job-tile i {
+  min-width: 53px;
+  color: #8de8d0;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 760;
+  text-align: right;
+}
+.job-tile.selected i { color: #d1fff0; }
+.shortlist-actions .primary-action,
+.shortlist-actions .outline-action { min-height: 37px; white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  .outcomes-card { grid-template-columns: 1fr; gap: 18px; }
+  .outcomes-card h2 { max-width: 510px; }
+}
+
+@media (max-width: 820px) {
+  .demo-workspace-banner { grid-template-columns: 34px minmax(0, 1fr); gap: 11px; padding: 13px; border-radius: 15px; }
+  .demo-banner-mark { width: 34px; height: 34px; border-radius: 10px; font-size: 18px; }
+  .demo-workspace-banner .outline-action { grid-column: 2; justify-self: start; }
+  .demo-workspace-banner h2 { font-size: 15px; }
+  .demo-workspace-banner div > span { font-size: 10px; }
+  .hero-secondary {
+    display: inline-flex;
+    width: 100%;
+    min-width: 0;
+    min-height: 54px;
+  }
+  .onboarding-card .launch-path { min-height: 142px; }
+  .outcomes-card { padding: 20px; border-radius: 18px; }
+  .shortlist-actions { gap: 7px; }
+}
+
+@media (max-width: 560px) {
+  .hero-secondary > span:first-child { min-width: 27px; padding-right: 7px; }
+  .hero-secondary b { font-size: 10px; }
+  .hero-secondary small { font-size: 8px; }
+  .onboarding-card .launchpad-paths { grid-template-columns: 1fr; }
+  .onboarding-card .launch-path { min-height: 106px; }
+  .outcomes-card ul { grid-template-columns: 1fr; }
+  .outcomes-card li { padding: 9px 10px; }
+  .shortlist-card .section-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .shortlist-actions { width: 100%; justify-content: flex-start; }
+  .shortlist-actions .primary-action, .shortlist-actions .outline-action { flex: 1 1 auto; justify-content: center; }
+  .job-tile { align-items: center; }
+  .job-tile i { min-width: 48px; font-size: 8px; }
+}
+
+/* At the narrowest supported width, keep destination names readable and avoid
+   turning the persistent navigation into a horizontally overflowing strip. */
+@media (max-width: 340px) {
+  .nav-item { gap: 0; padding-inline: 5px; font-size: 9px; }
+  .nav-item svg { display: none; }
+}
+
+/* A target name is decision-critical; allow two concise lines rather than
+   hiding it behind an ellipsis in the shortlist. */
+.job-tile b {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.22;
+  white-space: normal;
+}
+
+.modal-demo-note {
+  margin: 12px 0 -4px;
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 199, 108, .35);
+  border-radius: 10px;
+  color: #f2d6a4;
+  background: rgba(121, 79, 28, .25);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.modal-demo-note b { color: #ffe6b9; }

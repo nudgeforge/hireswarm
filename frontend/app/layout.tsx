@@ -4,6 +4,7 @@ import "./spatial.css";
 import "./premium.css";
 import "./usability-fix.css";
 import "./craft.css";
+import "./guided.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://hireswarm-production.up.railway.app"),

@@ -1,11 +1,11 @@
 {
-  "name": "HireSwarm — Stronger applications from real experience",
+  "name": "HireSwarm — The evidence-backed application studio",
   "short_name": "HireSwarm",
   "description": "Prepare evidence-backed job applications, with your approval before export.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#081521",
-  "theme_color": "#081521",
+  "background_color": "#f0efe8",
+  "theme_color": "#102b24",
   "icons": [
     { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ]

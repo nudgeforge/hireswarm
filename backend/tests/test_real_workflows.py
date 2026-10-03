@@ -316,6 +316,32 @@ Python, FastAPI, PostgreSQL, Docker
             finally:
                 main_module.STATIC_DIR = previous_static_dir
 
+    def test_large_json_payloads_are_gzipped_for_slow_connections(self):
+        response = TestClient(app).get("/api/jobs?mode=demo", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(response.status_code, 200, response.text)
+        # httpx transparently decodes the body, while the header confirms the
+        # production middleware sent a compressed representation over the wire.
+        self.assertEqual(response.headers.get("content-encoding"), "gzip")
+        self.assertIn("Accept-Encoding", response.headers.get("vary", ""))
+        self.assertGreaterEqual(len(response.json()["jobs"]), 3)
+
+    def test_exported_static_assets_are_gzipped_and_immutable(self):
+        previous_static_dir = main_module.STATIC_DIR
+        with tempfile.TemporaryDirectory() as directory:
+            static_dir = Path(directory)
+            asset = static_dir / "_next" / "static" / "chunks" / "application.js"
+            asset.parent.mkdir(parents=True)
+            asset.write_text("const evidence = 'source-linked work example';\n" * 120)
+            main_module.STATIC_DIR = static_dir
+            try:
+                response = TestClient(app).get("/_next/static/chunks/application.js", headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers.get("content-encoding"), "gzip")
+                self.assertIn("Accept-Encoding", response.headers.get("vary", ""))
+                self.assertEqual(response.headers.get("cache-control"), "public, max-age=31536000, immutable")
+            finally:
+                main_module.STATIC_DIR = previous_static_dir
+
     def test_public_job_list_is_capped_and_long_description_stays_server_side_until_detail(self):
         raw_description = "x" * 9_000
         jobs = [{

@@ -919,8 +919,8 @@ export default function Home() {
           <div className="command-hero-copy">
             <div className="hero-overline"><span className={cx("data-state", inDemoWorkspace && "practice")}>WELCOME TO HIRESWARM</span><span>YOU APPROVE EVERYTHING · NO AUTO-APPLY</span></div>
             <h1 id="workspace-title">Make your real work <em>impossible to miss.</em></h1>
-            <p className="hero-value">Turn your real experience into a stronger job application.</p>
-            <p className="command-hero-lede">Start with your CV, choose a role, and get a clear, evidence-backed application plan. HireSwarm shows what to highlight, what to explain, and what to improve — without inventing experience.</p>
+            <p className="hero-value">Build a clear case for why you should be shortlisted.</p>
+            <p className="command-hero-lede">Start with your CV, choose one role, and leave with proof-backed edits, interview practice, and an export you personally approve. No invented experience. No automatic applications.</p>
             <div className="hero-cta-row">
               <button className="hero-primary" disabled={runState === "running"} onClick={() => setShowIntake(true)} aria-describedby={serviceStatus === "offline" ? "service-outage-title" : undefined}><span className="hero-primary-icon">↑</span><span><b>Start with my CV</b><small>Upload a PDF, DOCX, TXT, or paste your experience</small></span></button>
               <button className="hero-secondary" onClick={tryDemoWorkspace} disabled={runIsActive}><span>DEMO</span><span><b>{inDemoWorkspace ? "Explore sample workflow" : "Try a demo"}</b><small>{inDemoWorkspace ? "Sample CV + role · no submission" : "Explore a sample CV and role safely"}</small></span><i>→</i></button>

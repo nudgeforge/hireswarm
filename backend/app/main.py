@@ -18,6 +18,7 @@ from docx import Document
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.middleware.gzip import GZipMiddleware
 from pypdf import PdfReader
 
 from .crewai_engine import available as crewai_available, run_optional_crew
@@ -39,6 +40,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# The Railway image serves exported Next assets through this same FastAPI app.
+# Compress substantial text, CSS, and JS responses at the edge-facing origin so
+# users on slower mobile connections do not pay the raw static-bundle cost.
+# Starlette deliberately leaves event streams uncompressed, preserving live run
+# updates and their timely flush behaviour.
+app.add_middleware(GZipMiddleware, minimum_size=700, compresslevel=5)
 
 # Railway's production image can package the exported Next.js frontend beside
 # this API. Local/API-only operation remains unchanged when the directory is

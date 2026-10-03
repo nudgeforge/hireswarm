@@ -1,15 +1,35 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./spatial.css";
 import "./premium.css";
 import "./usability-fix.css";
+import "./craft.css";
 
 export const metadata: Metadata = {
-  title: "HireSwarm | Stronger applications from real experience",
-  description: "Evidence-backed job application preparation, with your approval before export.",
+  metadataBase: new URL("https://hireswarm-production.up.railway.app"),
+  title: "HireSwarm | The evidence-backed application studio",
+  description: "Turn real CV evidence into a focused application plan, honest interview practice, and approval-gated exports. HireSwarm never applies on your behalf.",
+  applicationName: "HireSwarm",
+  keywords: ["job application", "CV tailoring", "resume evidence", "interview practice", "application tracker"],
   manifest: "/manifest.json",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.ico" },
   robots: { index: true, follow: true },
+  openGraph: {
+    type: "website",
+    siteName: "HireSwarm",
+    title: "HireSwarm | The evidence-backed application studio",
+    description: "Build an application from work you can actually prove — then approve every export yourself.",
+  },
+  twitter: {
+    card: "summary",
+    title: "HireSwarm | The evidence-backed application studio",
+    description: "Build an application from work you can actually prove — then approve every export yourself.",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#102b24",
+  colorScheme: "light",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

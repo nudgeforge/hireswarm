@@ -152,6 +152,18 @@ Python, FastAPI, PostgreSQL, Docker
         with self.assertRaisesRegex(ValueError, "too large"):
             asyncio.run(fetch_public_json("https://api.lever.co/v0/postings/example", transport=httpx.MockTransport(oversized)))
 
+    def test_bounded_reader_accepts_the_current_arbeitnow_feed_size(self):
+        # The official Arbeitnow feed is about 2.8 MB in production. It must
+        # remain usable while the reader still enforces its explicit 4 MB cap.
+        current_feed_sized_json = b"[]" + (b" " * (2_800_000 - 2))
+
+        def current_arbeitnow_size(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "application/json"}, content=current_feed_sized_json, request=request)
+
+        result = asyncio.run(fetch_public_json("https://www.arbeitnow.com/api/job-board-api", transport=httpx.MockTransport(current_arbeitnow_size)))
+        self.assertEqual(result, [])
+        self.assertLess(len(current_feed_sized_json), MAX_PUBLIC_RESPONSE_BYTES)
+
     def test_greenhouse_reads_compact_index_then_only_bounded_detail_records(self):
         calls: list[str] = []
 

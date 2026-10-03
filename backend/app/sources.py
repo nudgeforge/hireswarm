@@ -23,8 +23,11 @@ from .data import SKILL_ALIASES, has_alias
 USER_AGENT = "HireSwarm/1.0 (applicant-controlled job discovery; public feed reader)"
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Published boards should be compact JSON feeds. Refuse unexpectedly large bodies
-# rather than loading an unbounded response into worker memory.
-MAX_PUBLIC_RESPONSE_BYTES = 2_000_000
+# rather than loading an unbounded response into worker memory. Arbeitnow's
+# official complete public feed is presently about 2.8 MB, so the former 2 MB
+# ceiling incorrectly marked a normal, user-requested lookup as unavailable.
+# Four MB remains a strict bounded read while allowing that documented source.
+MAX_PUBLIC_RESPONSE_BYTES = 4_000_000
 MAX_PUBLIC_RESULTS = 12
 # A small internal Remotive cache can support a later query without exposing a
 # large response. Route handlers still request at most MAX_PUBLIC_RESULTS.

@@ -547,6 +547,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   line-height: 1.45;
 }
 .modal-demo-note b { color: #ffe6b9; }
+.target-label { flex-wrap: wrap; }
+.target-label .sample-role-label { padding: 6px 8px; border: 1px solid rgba(255, 201, 120, .42); border-radius: 999px; color: #ffe1aa; background: rgba(140, 85, 30, .24); font-size: 10px; font-weight: 850; letter-spacing: .055em; line-height: 1.15; text-transform: uppercase; }
+.evidence-first-use { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 9px; margin: 13px 0 2px; padding: 11px; border: 1px solid rgba(115, 220, 231, .25); border-radius: 11px; background: rgba(64, 140, 167, .12); }
+.evidence-first-use > span { width: 21px; height: 21px; display: grid; place-items: center; border: 1px solid rgba(125, 223, 232, .38); border-radius: 50%; color: #b9f5fb; font-family: Georgia, serif; font-size: 13px; font-weight: 700; }
+.evidence-first-use b { display: block; color: #d7f5fb; font-size: 11px; }
+.evidence-first-use p { margin: 3px 0 0; color: #a8c9d8; font-size: 10px; line-height: 1.5; }
 
 /* Performance-pass loading states: lightweight CSS only; no spinner library. */
 .inline-skeleton {
@@ -576,6 +582,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .initial-workspace-skeleton > p { margin: 0; color: #9bb7c9; font-size: 11px; }
 .deferred-panel-loading { display: grid; min-height: 225px; align-content: center; gap: 14px; padding: 24px 6px; color: #cde4ef; }
 .deferred-panel-loading > b { font-size: 15px; }
+.deferred-panel-loading > small { max-width: 540px; color: #9bb7c9; font-size: 12px; line-height: 1.5; }
 .deferred-panel-loading .inline-skeleton { max-width: 500px; }
 .deferred-panel-loading .inline-skeleton.short { width: 43%; }
 .deferred-dialog-loading { min-height: 180px; display: grid; align-content: center; gap: 12px; }
@@ -858,6 +865,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .gap-action-buttons { justify-content: flex-start; }
 }
 @media (max-width: 560px) {
+  .target-card-top { align-items: flex-start; flex-direction: column; }
+  .target-label .sample-role-label { font-size: 9px; }
   .recommended-action-card h2, .advanced-workspace-heading h2 { font-size: 23px; }
   .advanced-explainer > summary { padding: 14px; }
   .advanced-explainer summary small { line-height: 1.35; }

@@ -6,6 +6,7 @@ import "./usability-fix.css";
 import "./craft.css";
 import "./guided.css";
 import "./contrast.css";
+import "./focus.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://hireswarm-production.up.railway.app"),

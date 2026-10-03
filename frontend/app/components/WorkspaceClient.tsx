@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { GuidedStart, type GuidedStage } from "./GuidedStart";
+import { FocusedApplication } from "./FocusedApplication";
 
 type Origin = "demo_fixture" | "public_cache" | "user_pasted";
 type WorkspaceView = "match" | "rehearse" | "tailor" | "review";
@@ -200,7 +201,7 @@ function apiRunMode(engine: RunMode): "evidence_lab" | "crewai" {
 export default function Home() {
   const pathname = usePathname();
   // The lightweight root landing sends a person here only after they choose a
-  // starting point. Direct workspace links intentionally open the full view.
+  // starting point. Direct workspace links resume the concise next-step view.
   const [journeyStage, setJourneyStage] = useState<AppStage>("workspace");
   const [jobs, setJobs] = useState<Job[]>(fallbackJobs);
   const [showAllJobs, setShowAllJobs] = useState(false);
@@ -246,6 +247,11 @@ export default function Home() {
   const [isApproving, setIsApproving] = useState(false);
   const [isExporting, setIsExporting] = useState<"docx" | "pdf" | null>(null);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
+  // The focused journey is the default for /workspace. Direct links to a
+  // specialist area intentionally open the detailed studio, and people can
+  // always choose "More tools" from the focused surface.
+  const [showDetailedWorkspace, setShowDetailedWorkspace] = useState(() => Boolean(pathname && pathname !== "/workspace"));
+  const [isMatching, setIsMatching] = useState(false);
   const [loadingJobId, setLoadingJobId] = useState<string | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const jobDetailCacheRef = useRef(new Map<string, Job>());
@@ -317,7 +323,7 @@ export default function Home() {
   useEffect(() => {
     // The root stays deliberately lightweight. Query parameters are an
     // explicit hand-off from its three starting choices, not stored applicant
-    // data. A direct workspace route stays in the richer returning view.
+    // data. A direct workspace route resumes the concise next-step journey.
     const query = new URLSearchParams(window.location.search);
     const entry = query.get("entry");
     if (entry === "profile" || entry === "role") {
@@ -335,9 +341,9 @@ export default function Home() {
     if (query.get("demo") === "1" && !demoLaunchRef.current) {
       demoLaunchRef.current = true;
       window.history.replaceState(null, "", pathname);
-      // A person deliberately chose sample-only mode. Preserve that boundary
-      // even when a later health request succeeds or fails.
-      setServiceStatus("demo-only");
+      // Demo data is always visibly sample-only, but it can still exercise the
+      // real deterministic workflow when the service is online. "demo-only"
+      // remains reserved for the explicit offline/sample boundary below.
       tryDemoWorkspace();
       return;
     }
@@ -357,7 +363,10 @@ export default function Home() {
         setServiceHealth(healthResult.value);
         setServiceStatus((current) => current === "demo-only" ? "demo-only" : "online");
       } else {
-        setServiceStatus((current) => current === "demo-only" ? "demo-only" : "offline");
+        // A person who explicitly entered the sample route can still orient
+        // themselves while the service is unavailable. Keep that as an honest
+        // sample-only boundary rather than presenting a broken live workspace.
+        setServiceStatus((current) => current === "demo-only" || demoLaunchRef.current ? "demo-only" : "offline");
         setNotice(null);
       }
       setIsBootstrapping(false);
@@ -409,10 +418,13 @@ export default function Home() {
     const route = routeState(pathname);
     setActiveNavigation(route.section);
     setView(route.view);
+    // A deep link represents a deliberate request for a specialised area;
+    // preserve that expectation rather than bouncing someone back to setup.
+    if (pathname !== "/workspace") setShowDetailedWorkspace(true);
   }, [pathname]);
 
-  function resetRun(nextView: WorkspaceView = "match") {
-    streamRef.current?.close(); runLockRef.current = false; window.sessionStorage.removeItem(RUN_STORAGE_KEY); setRunId(null); setRunState("idle"); setPracticeFocus(null); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
+  function resetRun(nextView: WorkspaceView = "match", keepMatch = false) {
+    streamRef.current?.close(); runLockRef.current = false; window.sessionStorage.removeItem(RUN_STORAGE_KEY); setRunId(null); setRunState("idle"); setPracticeFocus(null); if (!keepMatch) setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
   }
 
   function scrollToShortlist() {
@@ -690,6 +702,36 @@ export default function Home() {
     };
   }
 
+  async function checkFitSummary() {
+    if (!selectedJob || runIsActive || runLockRef.current || isMatching) return;
+    if (!await requireLiveWorkspace("checking your match")) return;
+    // Public discovery cards intentionally contain only a compact summary.
+    // Loading a selected role's source text remains an explicit, one-role
+    // operation before any evidence comparison is made.
+    const targetJob = hasRoleDetail(selectedJob) ? selectedJob : await loadJobDetail(selectedJob.id);
+    if (!targetJob) return;
+    setIsMatching(true);
+    setActiveAgent("Checking your work examples against this job");
+    try {
+      const summary = await requestJson<MarketReport>(`${API}/api/match`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: targetJob.id, candidate }),
+      });
+      setServiceStatus("online");
+      setMarket(summary);
+      setCoverageAfter(null);
+      setView("match");
+      const direct = summary.verified_strengths.length;
+      const gaps = summary.gaps.length;
+      setNotice(`Your match is ready: ${direct} direct strength${direct === 1 ? "" : "s"}${gaps ? ` and ${gaps} honest gap${gaps === 1 ? "" : "s"}` : ""}.`);
+    } catch (error) {
+      reportActionError(error, "Your match could not be checked.");
+    } finally {
+      setIsMatching(false);
+    }
+  }
+
   async function startRehearsal() {
     if (!selectedJob || runIsActive || runLockRef.current) return;
     if (!await requireLiveWorkspace("building your fit summary")) return;
@@ -701,7 +743,10 @@ export default function Home() {
       setRunMode("evidence_lab");
       setNotice("Guided AI review is unavailable on this workspace, so HireSwarm will use its standard proof checks.");
     }
-    resetRun("rehearse");
+    // A person may already have reviewed the standalone fit summary. Keep it
+    // visible while the deeper preparation starts instead of making the match
+    // appear to vanish between two consecutive, related actions.
+    resetRun("rehearse", Boolean(market));
     runLockRef.current = true;
     setActiveNavigation("practice");
     scrollToWorkspacePanel();
@@ -926,6 +971,48 @@ setActiveAgent("Final application files approved");
     </>;
   }
 
+  if (!showDetailedWorkspace) {
+    return <>
+      <FocusedApplication
+        candidate={candidate}
+        selectedJob={selectedJob}
+        usingDemoProfile={usingDemoProfile}
+        selectedIsPractice={Boolean(selectedIsPractice)}
+        serviceStatus={serviceStatus}
+        runState={runState}
+        market={market}
+        patches={patches}
+        turns={turns}
+        activeAgent={activeAgent}
+        notice={notice}
+        isBootstrapping={isBootstrapping}
+        isMatching={isMatching}
+        isApproving={isApproving}
+        isExporting={isExporting}
+        runIsActive={runIsActive}
+        canStartLiveAction={canStartLiveAction}
+        onDismissNotice={() => setNotice(null)}
+        onOpenCv={() => setShowIntake(true)}
+        onFindRoles={() => void openRoleFinder()}
+        onPasteRole={openBlankJobForm}
+        onCheckFit={() => void checkFitSummary()}
+        onBuildPlan={() => void startRehearsal()}
+        onEditRole={() => void adaptSelectedJob()}
+        onOpenOfficial={openOfficialListing}
+        onRetry={() => void checkService(true)}
+        onApprove={() => void approvePacket()}
+        onExport={exportPacket}
+        onOpenFullWorkspace={(nextView = "match") => {
+          setShowDetailedWorkspace(true);
+          setView(nextView);
+          setActiveNavigation(nextView === "match" ? "workspace" : nextView === "rehearse" ? "practice" : "documents");
+          window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
+        }}
+      />
+      {modalLayer}
+    </>;
+  }
+
   return <main className="workspace-shell">
     <aside className="sidebar">
       <div className="sidebar-brand"><div className="mark">h.</div><span>hire<span>swarm</span></span></div>
@@ -953,6 +1040,7 @@ setActiveAgent("Final application files approved");
           </button>
         </div>
         <div className="header-actions command-actions" aria-label="Workspace controls">
+          <button className="command-action focus-return" onClick={() => { if (pathname !== "/workspace") window.history.pushState(null, "", "/workspace"); setShowDetailedWorkspace(false); setView("match"); setActiveNavigation("workspace"); }} aria-label="Return to the simple next-step view"><span className="command-icon">←</span><span className="command-copy"><b>Simple view</b><small>One next step</small></span></button>
           <div className="engine-switcher">
             <button className="command-action engine-trigger" onClick={() => setShowEngineMenu((open) => !open)} aria-expanded={showEngineMenu} aria-haspopup="menu" aria-label="Choose how your work examples are checked">
               <span className="command-icon engine-symbol">✓</span><span className="mobile-command-label">Proof</span><span className="command-copy"><b>{runMode === "crewai" ? "Guided AI review" : "Proof checks"}</b><small>How we verify your application</small></span><span className="chevron">⌄</span>

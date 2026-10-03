@@ -567,6 +567,26 @@ Reduced manual reporting time by 40 percent with a React dashboard.
         self.assertEqual(response.status_code, 422)
         self.assertIn("empty evidence ledger", response.json()["detail"])
 
+    def test_read_only_match_preview_returns_honest_fit_without_creating_a_run(self):
+        client = TestClient(app)
+        candidate = copy.deepcopy(DEMO_CANDIDATE)
+        before = set(main_module.RUNS)
+        response = client.post("/api/match", json={"job_id": "atlas-ai-backend", "candidate": candidate})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn("coverage", payload)
+        self.assertIn("Docker", {item["skill"] for item in payload["verified_strengths"]})
+        self.assertNotIn("Docker", {item["skill"] for item in payload["gaps"]})
+        self.assertEqual(set(main_module.RUNS), before, "a fit preview must not silently start an application run")
+
+    def test_match_preview_requires_reviewable_source_evidence(self):
+        response = TestClient(app).post("/api/match", json={
+            "job_id": "atlas-ai-backend",
+            "candidate": {"name": "Taylor Example", "headline": "Applicant", "location": "Remote", "preferences": [], "resume_text": "", "evidence": []},
+        })
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("source-linked", response.json()["detail"])
+
     def test_run_requires_name_and_verified_evidence(self):
         client = TestClient(app)
         base = {"job_id": "atlas-ai-backend", "candidate": {"name": "", "headline": "Applicant", "location": "Remote", "preferences": [], "resume_text": "", "evidence": [{"evidence_id": "cv_01", "source_section": "Resume", "source_text": "Built a FastAPI service.", "skills": ["FastAPI"], "status": "verified"}]}}

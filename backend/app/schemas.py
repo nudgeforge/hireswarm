@@ -22,6 +22,12 @@ class CandidateInput(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
 
 
+class MatchCreate(BaseModel):
+    """A lightweight, read-only fit check before an applicant starts a run."""
+    job_id: str
+    candidate: CandidateInput | None = None
+
+
 class RunCreate(BaseModel):
     job_id: str
     candidate: CandidateInput | None = None

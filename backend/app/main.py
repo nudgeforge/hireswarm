@@ -25,7 +25,7 @@ from .crewai_engine import available as crewai_available, run_optional_crew
 from .data import DEMO_CANDIDATE, DEMO_JOBS
 from .documents import build_docx, build_pdf, export_readiness
 from .evidence import build_cover_letter, build_interview, build_safe_patches, cover_letter_evidence_ids, extract_evidence_from_resume, score_job, validate_patches
-from .schemas import CandidateInput, EventPayload, ManualJobInput, PublicBoardInput, RunCreate, RunStatus
+from .schemas import CandidateInput, EventPayload, ManualJobInput, MatchCreate, PublicBoardInput, RunCreate, RunStatus
 from .sources import extract_skills, fetch_arbeitnow, fetch_greenhouse, fetch_lever, fetch_remotive, matches_query
 
 app = FastAPI(
@@ -733,6 +733,33 @@ def refresh_export_readiness(run: RunStatus) -> dict[str, Any]:
     readiness["passed"] = bool(readiness.get("passed") and integrity["passed"])
     run.result["export_readiness"] = readiness
     return readiness
+
+
+@app.post("/api/match")
+async def preview_match(payload: MatchCreate) -> dict[str, Any]:
+    """Return an immediate, deterministic fit summary without creating a run.
+
+    This lets an applicant understand the match before deciding to invest in
+    revisions, interview practice, or an approval-gated export. The endpoint
+    mutates neither the role registry nor a candidate record; it only maps the
+    supplied source-linked evidence to the selected job's requirements.
+    """
+    job = JOBS.get(payload.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    candidate = candidate_as_dict(payload.candidate)
+    if not str(candidate.get("name", "")).strip():
+        raise HTTPException(status_code=422, detail="Add your name before checking a job match.")
+    evidence = candidate.get("evidence") or []
+    if not evidence:
+        raise HTTPException(status_code=422, detail="Add or refresh at least one source-linked resume statement before checking this job match.")
+    if not any(item.get("status", "verified") == "verified" for item in evidence):
+        raise HTTPException(status_code=422, detail="Confirm at least one verified source statement before checking this job match.")
+    match = score_job(job, candidate)
+    # Keep this first-look response intentionally compact. The internal skill
+    # index is needed by the deeper run but is not useful in the applicant's
+    # initial decision and should not be needlessly returned to the browser.
+    return {key: match[key] for key in ("score", "coverage", "verified_strengths", "adjacent_strengths", "gaps")}
 
 
 @app.post("/api/runs")

@@ -34,7 +34,7 @@ export function JobModal({ title, company, location, url, description, onTitle, 
 export function LiveRolesModal({ onClose, onDiscover, onConnect }: { onClose: () => void; onDiscover: (query: string, source: "all" | "remotive" | "arbeitnow") => Promise<void>; onConnect: (source: "greenhouse" | "lever", board: string) => Promise<void> }) {
   const [query, setQuery] = useState("Python developer");
   const [settledQuery, setSettledQuery] = useState("Python developer");
-  const [feed, setFeed] = useState<"all" | "remotive" | "arbeitnow">("all");
+  const [feed, setFeed] = useState<"remotive" | "arbeitnow">("remotive");
   const [boardSource, setBoardSource] = useState<"greenhouse" | "lever">("greenhouse");
   const [board, setBoard] = useState("");
   const [busy, setBusy] = useState(false);
@@ -42,19 +42,29 @@ export function LiveRolesModal({ onClose, onDiscover, onConnect }: { onClose: ()
     const timer = window.setTimeout(() => setSettledQuery(query.trim()), 400);
     return () => window.clearTimeout(timer);
   }, [query]);
-  async function find(event: FormEvent<HTMLFormElement>) {
+  async function search(event: FormEvent<HTMLFormElement>, source: "all" | "remotive" | "arbeitnow") {
     event.preventDefault();
     const requestedQuery = query.trim();
     setBusy(true);
     try {
-      // The live provider is intentionally reached only after this button/form
-      // action. This small wait debounces rapid type-and-submit input.
       if (settledQuery !== requestedQuery) await new Promise<void>((resolve) => window.setTimeout(resolve, 400));
-      await onDiscover(requestedQuery, feed);
+      await onDiscover(requestedQuery, source);
     } finally { setBusy(false); }
   }
   async function connect(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!board.trim()) return; setBusy(true); try { await onConnect(boardSource, board.trim()); } finally { setBusy(false); } }
-  return <ModalShell onClose={onClose} eyebrow="PUBLIC JOB SOURCES" title="Find a suitable role."><p className="modal-copy">Search public listings when you are ready. HireSwarm reads published role details only; it never asks for employer credentials and never sends an application on your behalf.</p><section className="source-option"><div><span className="source-badge live">PUBLIC FEEDS</span><h3>Discover public remote roles</h3><p>Remotive and Arbeitnow are fetched only after you choose Find public roles. Search text settles for 400 ms as you type; no per-keystroke request is sent. Results are capped at 12, with server-side cache protection.</p></div><form onSubmit={find}><div className="field-grid compact"><label>Search terms (2+ characters)<input required minLength={2} maxLength={120} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. Python backend" /></label><label>Source<select value={feed} onChange={(event) => setFeed(event.target.value as "all" | "remotive" | "arbeitnow")}><option value="all">All public feeds</option><option value="remotive">Remotive</option><option value="arbeitnow">Arbeitnow</option></select></label></div><button className="outline-action" disabled={busy}>{busy ? "Checking…" : "Find public roles"} <span>↗</span></button></form></section><section className="source-option"><div><span className="source-badge official">OFFICIAL COMPANY BOARD</span><h3>Connect one company&apos;s public board</h3><p>Paste a board token or an HTTPS URL on boards.greenhouse.io, job-boards.greenhouse.io, or jobs.lever.co. HireSwarm reads published roles only and keeps the official apply link intact.</p></div><form onSubmit={connect}><div className="field-grid compact"><label>Board type<select value={boardSource} onChange={(event) => setBoardSource(event.target.value as "greenhouse" | "lever")}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></label><label>Public board URL or token<input required value={board} onChange={(event) => setBoard(event.target.value)} placeholder={boardSource === "greenhouse" ? "boards.greenhouse.io/company" : "jobs.lever.co/company"} /></label></div><button className="primary-action small" disabled={busy}>{busy ? "Connecting…" : "Read published roles"} <span>→</span></button></form></section><p className="source-footnote">If a public source is unavailable, no lookalike fixture is shown. You can always paste the role directly.</p></ModalShell>;
+  return <ModalShell onClose={onClose} eyebrow="PUBLIC JOBS" title="Find one job to prepare for.">
+    <p className="modal-copy">Search published roles, choose one, then we will compare it with your CV. HireSwarm only reads listings — it never contacts an employer or applies for you.</p>
+    <section className="source-option simple-source-search">
+      <h3>Search public jobs</h3>
+      <form onSubmit={(event) => void search(event, "all")}><label>What kind of role?<input required minLength={2} maxLength={120} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. Python backend" /></label><button className="primary-action small" disabled={busy}>{busy ? "Searching…" : "Search jobs"} <span>→</span></button></form>
+      <p>Results are capped and labelled with their source. We do not load public feeds until you search.</p>
+    </section>
+    <details className="simple-search-options"><summary>Need a specific source or company board? <span>⌄</span></summary><div>
+      <section><b>Choose one public source</b><form onSubmit={(event) => void search(event, feed)}><label>Source<select value={feed} onChange={(event) => setFeed(event.target.value as "remotive" | "arbeitnow")}><option value="remotive">Remotive</option><option value="arbeitnow">Arbeitnow</option></select></label><button className="outline-action" disabled={busy}>{busy ? "Searching…" : "Search this source"}</button></form></section>
+      <section><b>Read a company&apos;s public board</b><form onSubmit={(event) => void connect(event)}><label>Board type<select value={boardSource} onChange={(event) => setBoardSource(event.target.value as "greenhouse" | "lever")}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></label><label>Public board URL or token<input required value={board} onChange={(event) => setBoard(event.target.value)} placeholder={boardSource === "greenhouse" ? "boards.greenhouse.io/company" : "jobs.lever.co/company"} /></label><button className="outline-action" disabled={busy}>{busy ? "Reading…" : "Read published roles"}</button></form></section>
+    </div></details>
+    <p className="source-footnote">If a source is unavailable, no lookalike sample is shown. You can always paste a job listing instead.</p>
+  </ModalShell>;
 }
 
 export function HowItWorksModal({ onClose, onOpenProfile, onOpenLive, onOpenManual }: { onClose: () => void; onOpenProfile: () => void; onOpenLive: () => void; onOpenManual: () => void }) {

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { GuidedStart, type GuidedStage } from "./GuidedStart";
-import { FocusedApplication } from "./FocusedApplication";
+import { SimpleApplicationFlow } from "./SimpleApplicationFlow";
 
 type Origin = "demo_fixture" | "public_cache" | "user_pasted";
 type WorkspaceView = "match" | "rehearse" | "tailor" | "review";
@@ -247,10 +247,10 @@ export default function Home() {
   const [isApproving, setIsApproving] = useState(false);
   const [isExporting, setIsExporting] = useState<"docx" | "pdf" | null>(null);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
-  // The focused journey is the default for /workspace. Direct links to a
-  // specialist area intentionally open the detailed studio, and people can
-  // always choose "More tools" from the focused surface.
-  const [showDetailedWorkspace, setShowDetailedWorkspace] = useState(() => Boolean(pathname && pathname !== "/workspace"));
+  // The old studio is retained in source while the product is simplified, but
+  // it is no longer a normal route or a first-run destination. Every public
+  // route opens the same linear application journey.
+  const [showDetailedWorkspace, setShowDetailedWorkspace] = useState(false);
   const [isMatching, setIsMatching] = useState(false);
   const [loadingJobId, setLoadingJobId] = useState<string | null>(null);
   const streamRef = useRef<EventSource | null>(null);
@@ -262,7 +262,6 @@ export default function Home() {
   const shortlistRef = useRef<HTMLElement | null>(null);
   const workspacePanelRef = useRef<HTMLElement | null>(null);
   const demoLaunchRef = useRef(false);
-  const finderLaunchRef = useRef(false);
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) ?? jobs[0], [jobs, selectedJobId]);
   const selectedIsPractice = selectedJob?.origin === "demo_fixture";
@@ -327,15 +326,13 @@ export default function Home() {
     const query = new URLSearchParams(window.location.search);
     const entry = query.get("entry");
     if (entry === "profile" || entry === "role") {
-      setJourneyStage(entry);
-      // The query is a one-time hand-off from the lean landing. Remove it so
-      // browser Back later resumes the actual application instead of reopening
-      // an old onboarding step.
+      // Landing hand-offs now land in the same calm linear journey rather than
+      // a second onboarding screen. A CV request opens the one needed sheet;
+      // a role request still keeps the safe CV-first order clear.
+      setJourneyStage("workspace");
       window.history.replaceState(null, "", pathname);
-      if (entry === "role" && query.get("finder") === "1" && !finderLaunchRef.current) {
-        finderLaunchRef.current = true;
-        void openRoleFinder();
-      }
+      if (entry === "profile") setShowIntake(true);
+      if (entry === "role") setNotice("Start with your CV first. After that, choosing a job is the next screen.");
       return;
     }
     if (query.get("demo") === "1" && !demoLaunchRef.current) {
@@ -418,9 +415,9 @@ export default function Home() {
     const route = routeState(pathname);
     setActiveNavigation(route.section);
     setView(route.view);
-    // A deep link represents a deliberate request for a specialised area;
-    // preserve that expectation rather than bouncing someone back to setup.
-    if (pathname !== "/workspace") setShowDetailedWorkspace(true);
+    // Old specialist URLs intentionally resolve to the same simple journey.
+    // No route should drop a first-time job seeker into a dense dashboard.
+    setShowDetailedWorkspace(false);
   }, [pathname]);
 
   function resetRun(nextView: WorkspaceView = "match", keepMatch = false) {
@@ -903,7 +900,12 @@ setActiveAgent("Final application files approved");
       setCandidate(data.candidate);
       setUsingDemoProfile(false);
       resetRun("match");
-      setNotice(`Imported ${data.import?.filename || "your CV"}: ${data.import?.evidence_count || data.candidate.evidence.length} evidence items to review. ${data.import?.retention || ""}`);
+      // Upload is the completed first step, not a place where a person should
+      // have to find a separate Save or Next control. Move straight to job
+      // selection while keeping the evidence editable from the CV button.
+      setJourneyStage("workspace");
+      setShowIntake(false);
+      setNotice(`CV added: ${data.import?.evidence_count || data.candidate.evidence.length} real work examples are ready. Next: choose one job.`);
     } catch (error) { reportActionError(error, "That document could not be read."); }
     finally { setIsImporting(false); }
   }
@@ -924,7 +926,9 @@ setActiveAgent("Final application files approved");
       // A refresh alone must not relabel the untouched sample profile as the
       // applicant's own CV. Editing resume_text or importing a file does that.
       resetRun("match");
-      setNotice("Your evidence list was refreshed from the CV text. Review it before running a practice session.");
+      setJourneyStage("workspace");
+      setShowIntake(false);
+      setNotice("CV added. Your work examples are ready; next, choose one job.");
     } catch (error) { reportActionError(error, "Resume analysis did not complete."); }
     finally { setIsAnalyzing(false); }
   }
@@ -973,11 +977,10 @@ setActiveAgent("Final application files approved");
 
   if (!showDetailedWorkspace) {
     return <>
-      <FocusedApplication
+      <SimpleApplicationFlow
         candidate={candidate}
         selectedJob={selectedJob}
         usingDemoProfile={usingDemoProfile}
-        selectedIsPractice={Boolean(selectedIsPractice)}
         serviceStatus={serviceStatus}
         runState={runState}
         market={market}
@@ -985,29 +988,23 @@ setActiveAgent("Final application files approved");
         turns={turns}
         activeAgent={activeAgent}
         notice={notice}
-        isBootstrapping={isBootstrapping}
         isMatching={isMatching}
         isApproving={isApproving}
         isExporting={isExporting}
         runIsActive={runIsActive}
         canStartLiveAction={canStartLiveAction}
+        exportReadiness={exportReadiness}
         onDismissNotice={() => setNotice(null)}
         onOpenCv={() => setShowIntake(true)}
-        onFindRoles={() => void openRoleFinder()}
         onPasteRole={openBlankJobForm}
+        onFindRoles={() => void openRoleFinder()}
         onCheckFit={() => void checkFitSummary()}
         onBuildPlan={() => void startRehearsal()}
         onEditRole={() => void adaptSelectedJob()}
-        onOpenOfficial={openOfficialListing}
-        onRetry={() => void checkService(true)}
         onApprove={() => void approvePacket()}
         onExport={exportPacket}
-        onOpenFullWorkspace={(nextView = "match") => {
-          setShowDetailedWorkspace(true);
-          setView(nextView);
-          setActiveNavigation(nextView === "match" ? "workspace" : nextView === "rehearse" ? "practice" : "documents");
-          window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
-        }}
+        onRetry={() => void checkService(true)}
+        onUseDemo={tryDemoWorkspace}
       />
       {modalLayer}
     </>;

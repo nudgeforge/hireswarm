@@ -41,7 +41,9 @@ export default function GuidedLanding() {
     serviceStatus={serviceStatus}
     isActionChecking={false}
     onRetry={() => void checkService()}
-    onStart={() => setStage("starting-point")}
+    // One clear first action: the workspace itself now begins with CV upload.
+    // Do not put a new job seeker through another chooser before that.
+    onStart={() => moveTo("/workspace")}
     onExploreDemo={() => moveTo("/workspace?demo=1")}
     onChooseCv={() => moveTo("/workspace?entry=profile")}
     onChooseRole={() => moveTo("/workspace?entry=role")}

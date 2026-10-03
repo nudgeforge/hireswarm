@@ -31,7 +31,9 @@ class MatchCreate(BaseModel):
 class RunCreate(BaseModel):
     job_id: str
     candidate: CandidateInput | None = None
-    mode: Literal["evidence_lab", "crewai"] = "evidence_lab"
+    # `generative` is intentionally opt-in from the browser. It sends only a
+    # minimized verified-evidence context to the configured server-side model.
+    mode: Literal["evidence_lab", "crewai", "generative"] = "evidence_lab"
 
 
 class EventPayload(BaseModel):

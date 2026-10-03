@@ -22,6 +22,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pypdf import PdfReader
 
 from .crewai_engine import available as crewai_available, run_optional_crew
+from .generative_engine import available as generative_available, generate_guidance, public_status as generative_status
 from .data import DEMO_CANDIDATE, DEMO_JOBS
 from .documents import build_docx, build_pdf, export_readiness
 from .evidence import build_cover_letter, build_interview, build_safe_patches, cover_letter_evidence_ids, extract_evidence_from_resume, score_job, validate_patches
@@ -224,12 +225,16 @@ async def root() -> Response | dict[str, str]:
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
+    gemini = generative_status()
     return {
         "ok": True,
         "service": "HireSwarm application workspace",
-        "mode": "deterministic evidence engine",
-        # This reports usable provider-backed CrewAI, not merely an opt-in flag.
+        "mode": "evidence engine with optional generative guidance" if gemini["available"] else "deterministic evidence engine",
+        # Kept for the older, inactive workspace client. This is the legacy
+        # CrewAI/LiteLLM route; the active product uses the lighter Gemini
+        # integration exposed below.
         "optional_crewai": crewai_available(),
+        "generative_ai": gemini,
         "time": now(),
     }
 
@@ -547,21 +552,29 @@ async def manual_job(payload: ManualJobInput) -> dict[str, Any]:
 
 
 async def execute_mission(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any], mode: str) -> None:
-    """Run optional provider-backed CrewAI enrichment, then the authoritative evidence flow."""
+    """Run optional guidance, then the authoritative evidence workflow.
+
+    Gemini never replaces the deterministic evaluator. It can add review-only
+    coaching after an applicant explicitly opts in; fit, patches, approval, and
+    exports remain source-validated server work.
+    """
+    use_generative = mode == "generative" and generative_available()
+    if mode == "generative" and not use_generative:
+        event(run, "generative_fallback", "Gemini guidance unavailable", "Continuing with standard evidence checks. Your CV evidence stays protected by the same approval safeguards.", "Application guide")
     if mode == "crewai":
         if crewai_available():
             event(run, "agent_active", "CrewAI relay connected", "A free-provider CrewAI narrative pass is running before evidence validation.", "Mission Conductor", {"phase": "crewai_enrichment"})
             try:
                 narrative = await asyncio.to_thread(run_optional_crew, job, candidate)
                 event(run, "crewai_enrichment", "CrewAI relay returned", "Provider narrative is available; deterministic evidence rules remain authoritative.", "Mission Conductor", {"provider": narrative.get("provider", "configured provider")})
-            except Exception as exc:
-                event(run, "crewai_fallback", "Guided review unavailable", f"Continuing with standard evidence checks: {str(exc)[:120]}", "Application guide")
+            except Exception:
+                event(run, "crewai_fallback", "Guided review unavailable", "Continuing with standard evidence checks and source-linked safeguards.", "Application guide")
         else:
             event(run, "crewai_fallback", "Guided review is not enabled", "Continuing with standard evidence checks. Your work examples and approval safeguards stay the same.", "Application guide")
-    await execute_evidence_lab(run, job, candidate)
+    await execute_evidence_lab(run, job, candidate, use_generative=use_generative)
 
 
-async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any]) -> None:
+async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: dict[str, Any], use_generative: bool = False) -> None:
     try:
         run.status = "running"
         event(run, "run_started", "Fit check started", "Matching your work examples with this job’s requirements.", "Application guide")
@@ -579,6 +592,24 @@ async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: d
             "gaps": match["gaps"],
         })
         await asyncio.sleep(0.55)
+
+        generative_guidance: list[dict[str, Any]] = []
+        if use_generative:
+            event(run, "agent_active", "Gemini preparing coaching", "Creating optional, evidence-bounded coaching. Generated wording remains review-only.", "Application guide", {"phase": "generative_guidance"})
+            try:
+                guidance = await asyncio.to_thread(generate_guidance, job, candidate, match)
+                generative_guidance = list(guidance.get("agents", []))
+                for item in generative_guidance:
+                    event(run, "generative_guidance", "Gemini coaching brief", str(item.get("brief", "")), str(item.get("agent", "Application guide")), {
+                        "provider": guidance.get("provider", "Gemini"),
+                        "model": guidance.get("model", "configured model"),
+                        "generated": True,
+                        "review_only": True,
+                        "evidence_ids": item.get("evidence_ids", []),
+                    })
+            except Exception:
+                event(run, "generative_fallback", "Gemini guidance unavailable", "Continuing with standard evidence checks. No generated wording will be used in this run.", "Application guide")
+        await asyncio.sleep(0.35)
 
         event(run, "agent_active", "Candidate Twin assembling", "Binding answers to the evidence ledger. Unsupported claims will be blocked.", "Candidate Twin", {"phase": "evidence_binding"})
         await asyncio.sleep(0.8)
@@ -660,6 +691,7 @@ async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: d
                 "patches": [],
                 "cover_letter": cover_letter,
                 "cover_letter_evidence_ids": cover_letter_ids,
+                "generative_guidance": generative_guidance,
                 "coverage_before": match["coverage"],
                 "coverage_after": coverage_after,
             }
@@ -679,6 +711,7 @@ async def execute_evidence_lab(run: RunStatus, job: dict[str, Any], candidate: d
             "patches": validation["safe_patches"],
             "cover_letter": cover_letter,
             "cover_letter_evidence_ids": cover_letter_ids,
+            "generative_guidance": generative_guidance,
             "coverage_before": match["coverage"],
             "coverage_after": coverage_after,
         }

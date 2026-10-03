@@ -11,7 +11,11 @@ export const metadata: Metadata = {
   applicationName: "HireSwarm",
   keywords: ["job application", "resume tailoring", "CV evidence", "interview preparation", "job fit"],
   manifest: "/manifest.json",
-  icons: { icon: "/favicon.svg", shortcut: "/favicon.ico" },
+  icons: {
+    icon: [{ url: "/favicon.svg?v=3", type: "image/svg+xml" }, { url: "/favicon.ico?v=3", sizes: "any" }],
+    shortcut: "/favicon.ico?v=3",
+    apple: "/apple-touch-icon.png?v=3",
+  },
   robots: { index: true, follow: true },
   openGraph: {
     type: "website",

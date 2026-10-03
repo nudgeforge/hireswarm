@@ -24,6 +24,7 @@ type ExportCheck = { label: string; passed: boolean; detail: string };
 type ExportReadiness = { passed: boolean; checks: ExportCheck[]; verified_bullets: number; extracted_characters: number };
 type ActivityEvent = { type: string; title: string; agent?: string | null; message?: string | null; payload: Record<string, unknown>; at?: string | null };
 type SourceResponse = { jobs: Job[]; source_errors?: string[]; provenance?: { label?: string; cache_state?: string; retrieved_at?: string | null; polling_policy?: string } };
+type GenerativeStatus = { available?: boolean; provider?: string | null; model?: string | null; consent_required?: boolean; data_use?: string };
 type RunCheckpoint = { id: string; status: RunState; selected_job_id: string; mode: string; event_count: number; job?: Job | null };
 type ApplicationRecord = { id: string; candidate: Candidate; job: Job; match: Match | null; runId: string | null; runState: RunState; stage: WorkflowStage; updatedAt: string; events: ActivityEvent[]; patches: Patch[]; turns: Turn[]; coverLetter: string; readiness: ExportReadiness | null; patchReview: Record<string, boolean> };
 type SavedWorkspace = { version: 1; draftId: string; candidate: Candidate | null; job: Job | null; match: Match | null; runId: string | null; runState: RunState; stage: WorkflowStage; events: ActivityEvent[]; patches: Patch[]; turns: Turn[]; coverLetter: string; readiness: ExportReadiness | null; patchReview: Record<string, boolean> };
@@ -125,6 +126,8 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
   const [jobResults, setJobResults] = useState<Job[]>([]);
   const [searchMeta, setSearchMeta] = useState<SourceResponse["provenance"] | null>(null);
   const [agentTab, setAgentTab] = useState<"agents" | "activity" | "resume">("activity");
+  const [generativeStatus, setGenerativeStatus] = useState<GenerativeStatus | null>(null);
+  const [useGenerative, setUseGenerative] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const uploadLockRef = useRef(false);
   const jobLockRef = useRef(false);
@@ -140,6 +143,7 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
   const currentMeta = viewMeta[view];
   const stageIndex = stages.findIndex((item) => item.id === stage);
   const hasVerifiedEvidence = Boolean(candidate?.evidence.some((item) => item.status === "verified"));
+  const generativeAvailable = Boolean(generativeStatus?.available);
 
   function notify(kind: ToastKind, text: string, action: ToastAction = null) { setToast({ kind, text, action }); }
 
@@ -147,12 +151,14 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     setService("checking");
     try {
       const response = await fetch(`${API}/healthz`, { cache: "no-store" });
-      const data = await response.json() as { ok?: boolean };
+      const data = await response.json() as { ok?: boolean; generative_ai?: GenerativeStatus };
       if (!response.ok || !data.ok) throw new Error("not ready");
+      setGenerativeStatus(data.generative_ai || null);
       setService("online");
       if (!silent) notify("success", "Live workspace is connected.");
       return true;
     } catch {
+      setGenerativeStatus(null); setUseGenerative(false);
       setService("offline");
       if (!silent) notify("error", "The live workspace is unavailable. Your browser draft has not been lost.", "health");
       return false;
@@ -252,6 +258,8 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
 
   useEffect(() => { setView(initialView); setMobileNav(false); }, [initialView]);
 
+  useEffect(() => { if (!generativeAvailable) setUseGenerative(false); }, [generativeAvailable]);
+
   useEffect(() => {
     if (!hydrated) return;
     const saved: SavedWorkspace = { version: 1, draftId, candidate, job, match, runId, runState, stage, events: events.slice(-80), patches, turns, coverLetter, readiness, patchReview };
@@ -278,7 +286,7 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     try {
       const body = new FormData(); body.append("file", file);
       const result = await requestJson<{ candidate: Candidate; import: { evidence_count: number; filename: string } }>(`${API}/api/candidate/upload`, { method: "POST", body });
-      clearRunState(); setCandidate(result.candidate); setJob(null); setMatch(null); setStage("job"); setView("new"); setJobResults([]);
+      clearRunState(); setUseGenerative(false); setCandidate(result.candidate); setJob(null); setMatch(null); setStage("job"); setView("new"); setJobResults([]);
       notify("success", `${result.import.filename} parsed. ${result.import.evidence_count} reviewable evidence item${result.import.evidence_count === 1 ? "" : "s"} found.`);
     } catch (error) { notify("error", error instanceof Error ? error.message : "We could not read that CV."); }
     finally { uploadLockRef.current = false; setUploading(false); }
@@ -303,7 +311,7 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     setAddingJob(true); setToast(null);
     try {
       const created = await requestJson<Job>(`${API}/api/jobs/manual`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(jobForm) });
-      clearRunState(); setJob(created); setMatch(null); setStage("fit"); setView("new");
+      clearRunState(); setUseGenerative(false); setJob(created); setMatch(null); setStage("fit"); setView("new");
       notify("success", "Job added. Now check what your real experience supports.");
     } catch (error) { notify("error", error instanceof Error ? error.message : "We could not add that job."); }
     finally { jobLockRef.current = false; setAddingJob(false); }
@@ -332,7 +340,7 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     setAddingJob(true); setToast(null);
     try {
       const detail = await requestJson<Job>(`${API}/api/jobs/${encodeURIComponent(summary.id)}`);
-      clearRunState(); setJob(detail); setMatch(null); setStage("fit"); setView("new");
+      clearRunState(); setUseGenerative(false); setJob(detail); setMatch(null); setStage("fit"); setView("new");
       notify("success", "Public job selected. Check the evidence fit before starting your agents.");
     } catch (error) { notify("error", error instanceof Error ? error.message : "We could not open that job."); }
     finally { jobLockRef.current = false; setAddingJob(false); }
@@ -355,11 +363,12 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     if (runLockRef.current || !candidate || !job || !match) return;
     runLockRef.current = true;
     if (!await ensureLive()) { runLockRef.current = false; return; }
+    const requestedGenerative = useGenerative && generativeAvailable;
     setStartingRun(true); setToast(null); clearRunState(); setRunState("running"); setStage("agents"); setView("new");
     try {
-      const created = await requestJson<{ run_id: string }>(`${API}/api/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_id: job.id, candidate, mode: "evidence_lab" }) });
+      const created = await requestJson<{ run_id: string }>(`${API}/api/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_id: job.id, candidate, mode: requestedGenerative ? "generative" : "evidence_lab" }) });
       setRunId(created.run_id); connectRun(created.run_id);
-      notify("info", "Your AI team is now working from the real evidence ledger.");
+      notify("info", requestedGenerative ? "Gemini and your evidence team are preparing review-only coaching." : "Your AI team is now working from the real evidence ledger.");
     } catch (error) { setRunState("failed"); notify("error", error instanceof Error ? error.message : "We could not start the agent workflow.", "stream"); }
     finally { runLockRef.current = false; setStartingRun(false); }
   }
@@ -403,12 +412,12 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     const empty: SavedWorkspace = { version: 1, draftId: nextDraftId, candidate: null, job: null, match: null, runId: null, runState: "idle", stage: "cv", events: [], patches: [], turns: [], coverLetter: "", readiness: null, patchReview: {} };
     closeStream(); setToast(null);
     try { window.localStorage.setItem(WORKSPACE_KEY, JSON.stringify(empty)); } catch { /* browser storage is optional */ }
-    setDraftId(nextDraftId); setCandidate(null); setJob(null); setMatch(null); setStage("cv"); setRunId(null); setRunState("idle"); setEvents([]); setPatches([]); setTurns([]); setCoverLetter(""); setReadiness(null); setPatchReview({}); setJobResults([]); setPasteCv(""); setJobForm({ title: "", company: "", location: "", url: "", description: "" }); setView("new");
+    setDraftId(nextDraftId); setUseGenerative(false); setCandidate(null); setJob(null); setMatch(null); setStage("cv"); setRunId(null); setRunState("idle"); setEvents([]); setPatches([]); setTurns([]); setCoverLetter(""); setReadiness(null); setPatchReview({}); setJobResults([]); setPasteCv(""); setJobForm({ title: "", company: "", location: "", url: "", description: "" }); setView("new");
     if (navigate) router.push("/new");
   }
 
-  function editSourceCv() { clearRunState(); setJob(null); setMatch(null); setStage("cv"); setView("new"); notify("info", "Update your source CV, then rerun the real evidence workflow. Previous approval remains invalidated."); }
-  function changeJob() { clearRunState(); setJob(null); setMatch(null); setStage("job"); setView("new"); notify("info", "Choose one replacement job. Previous run and approval state have been cleared."); }
+  function editSourceCv() { clearRunState(); setUseGenerative(false); setJob(null); setMatch(null); setStage("cv"); setView("new"); notify("info", "Update your source CV, then rerun the real evidence workflow. Previous approval remains invalidated."); }
+  function changeJob() { clearRunState(); setUseGenerative(false); setJob(null); setMatch(null); setStage("job"); setView("new"); notify("info", "Choose one replacement job. Previous run and approval state have been cleared."); }
   function openApplication(record: ApplicationRecord) { closeStream(); setDraftId(record.id); setCandidate(record.candidate); setJob(record.job); setMatch(record.match); setRunId(record.runId); setRunState(record.runState); setStage(record.stage); setEvents(record.events || []); setPatches(record.patches || []); setTurns(record.turns || []); setCoverLetter(record.coverLetter || ""); setReadiness(record.readiness || null); setPatchReview(record.patchReview || {}); setView("new"); if (record.runId) void restoreRun(record.runId); }
   function clearBrowserWorkspace() { if (window.confirm("Clear the saved HireSwarm workspace and local application list from this browser?")) { closeStream(); window.localStorage.removeItem(WORKSPACE_KEY); window.localStorage.removeItem(APPLICATIONS_KEY); setApplications([]); beginNewApplication(); notify("success", "Browser workspace cleared."); } }
 
@@ -597,13 +606,43 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
   function agentCard(name: string, initials: string, tone: string, copy: string) { const status = agentStatus(name); return <article className={`hs-agent-card ${tone}`} key={name}><div><span>{initials}</span><em className={status === "Working" ? "working" : ""}>{status}</em></div><h3>{name}</h3><p>{copy}</p></article>; }
   function eventEvidence(event: ActivityEvent) { const ids = Array.isArray(event.payload.evidence_ids) ? event.payload.evidence_ids.map(String) : []; return ids.length ? <span className="hs-event-evidence">{ids.map((id) => <b key={id}>{id}</b>)}</span> : null; }
 
+  function renderGenerativeOption() {
+    const provider = generativeStatus?.provider || "Gemini";
+    const running = runState === "running" || startingRun;
+    const available = generativeAvailable && service === "online";
+    const availabilityCopy = service === "checking"
+      ? "Checking whether secure generative guidance is available…"
+      : available
+        ? "Add a bounded Gemini coaching pass alongside the evidence workflow."
+        : "Generative guidance is not configured on this workspace. Evidence-led mode remains available.";
+    return <section className={`hs-generative-option ${available ? "available" : "unavailable"}`} aria-labelledby="generative-option-title">
+      <div className="hs-generative-option-top">
+        <span className="hs-generative-icon"><Icon name="spark" size={19} /></span>
+        <div><p className="hs-eyebrow">OPTIONAL GENERATIVE AI</p><h3 id="generative-option-title">{provider}-guided coaching</h3><p>{availabilityCopy}</p></div>
+        <label className="hs-generative-switch">
+          <input type="checkbox" checked={useGenerative} disabled={!available || running} onChange={(event) => setUseGenerative(event.target.checked)} aria-describedby="generative-data-note" />
+          <span aria-hidden="true" />
+          <b>Use {provider}</b>
+        </label>
+      </div>
+      <p className="hs-generative-data-note" id="generative-data-note"><Icon name="lock" size={14} />{available ? generativeStatus?.data_use || "Selected verified CV evidence and job requirements are sent to Gemini only for this opted-in run." : "No CV or job information is sent to a generative provider while this option is unavailable or switched off."}</p>
+      {available && <p className="hs-generative-boundary"><Icon name="evidence" size={14} />Generated coaching is review-only. The server still validates every claim before it can appear in a final document.</p>}
+    </section>;
+  }
+
   function renderAgentRoom(compact = false) {
-    const room = <div className={`hs-agent-room ${compact ? "compact" : ""}`}><section className={`hs-agent-column ${agentTab === "agents" ? "mobile-current" : ""}`}><div className="hs-room-label"><span>AI TEAM</span><small>Live roles</small></div>{agentCard("Candidate Twin", "CT", "tone-one", "Connects answers to real work evidence.")}{agentCard("HR Interrogator", "HR", "tone-two", "Challenges claims and keeps gaps honest.")}{agentCard("Resume Surgeon", "RS", "tone-three", "Prepares only source-linked improvements.")}</section><section className={`hs-timeline-column ${agentTab === "activity" ? "mobile-current" : ""}`}><div className="hs-room-heading"><div><span>COLLABORATION ACTIVITY</span><h3>{runState === "running" ? activeAgent : runState === "awaiting_approval" ? "Ready for your review" : "Evidence-led workflow"}</h3></div>{runState === "running" && <span className="hs-live-indicator"><i /> Live</span>}</div>{events.length ? <ol className="hs-event-list">{events.map((event, index) => <li key={`${event.at || index}-${event.type}`}><span className={`hs-event-dot ${event.type === "gap_detected" || event.type === "evidence_needed" ? "warning" : ""}`}><Icon name={event.type === "gap_detected" || event.type === "evidence_needed" ? "warning" : event.type === "resume_patch" ? "spark" : "check"} size={13} /></span><div><header><b>{event.agent || "Evidence engine"}</b><small>{event.title}</small></header><p>{event.message || "Updated the application workflow."}</p>{eventEvidence(event)}</div></li>)}</ol> : <div className="hs-timeline-empty"><Icon name="team" size={25} /><b>Your agents are ready.</b><p>Start only after you have reviewed the fit. We will show actual server events here — not simulated reasoning.</p></div>}{runState === "running" && <div className="hs-working-line"><i /><span>Waiting for the next real agent event…</span></div>}{runState === "failed" && <button type="button" className="hs-button hs-button-secondary hs-button-small" onClick={() => runId && void restoreRun(runId)}>Reconnect activity <Icon name="refresh" size={15} /></button>}</section><section className={`hs-resume-column ${agentTab === "resume" ? "mobile-current" : ""}`}><div className="hs-room-heading"><div><span>RESUME &amp; EVIDENCE</span><h3>{candidate?.headline || "Your source CV"}</h3></div></div>{patches.length ? <div className="hs-room-patches">{patches.slice(0, 3).map((patch, index) => <article key={patchKey(patch, index)}><small>{patch.section}</small><p>{patch.proposed}</p><span>{patch.evidence_ids.join(" · ")}</span></article>)}</div> : <div className="hs-resume-mini"><Icon name="resume" size={22} /><p>Proposed, evidence-linked edits will appear here when the workflow reaches the review stage.</p></div>}<div className="hs-evidence-mini"><span>Evidence ledger</span>{candidate?.evidence.slice(0, 3).map((item) => <button type="button" key={item.evidence_id} onClick={() => setView("evidence")}><b>{item.evidence_id}</b><p>{item.source_text}</p></button>)}</div></section></div>;
+    const room = <div className={`hs-agent-room ${compact ? "compact" : ""}`}><section className={`hs-agent-column ${agentTab === "agents" ? "mobile-current" : ""}`}><div className="hs-room-label"><span>AI TEAM</span><small>Live roles</small></div>{agentCard("Candidate Twin", "CT", "tone-one", "Connects answers to real work evidence.")}{agentCard("HR Interrogator", "HR", "tone-two", "Challenges claims and keeps gaps honest.")}{agentCard("Resume Surgeon", "RS", "tone-three", "Prepares only source-linked improvements.")}</section><section className={`hs-timeline-column ${agentTab === "activity" ? "mobile-current" : ""}`}><div className="hs-room-heading"><div><span>COLLABORATION ACTIVITY</span><h3>{runState === "running" ? activeAgent : runState === "awaiting_approval" ? "Ready for your review" : "Evidence-led workflow"}</h3></div>{runState === "running" && <span className="hs-live-indicator"><i /> Live</span>}</div>{events.length ? <ol className="hs-event-list">{events.map((event, index) => <li key={`${event.at || index}-${event.type}`}><span className={`hs-event-dot ${event.type === "gap_detected" || event.type === "evidence_needed" ? "warning" : ""}`}><Icon name={event.type === "gap_detected" || event.type === "evidence_needed" ? "warning" : event.type === "resume_patch" || event.type === "generative_guidance" ? "spark" : "check"} size={13} /></span><div><header><b>{event.agent || "Evidence engine"}</b><small>{event.title}</small></header><p>{event.message || "Updated the application workflow."}</p>{event.type === "generative_guidance" && <span className="hs-generated-event"><Icon name="spark" size={11} /> Gemini · review-only coaching</span>}{eventEvidence(event)}</div></li>)}</ol> : <div className="hs-timeline-empty"><Icon name="team" size={25} /><b>Your agents are ready.</b><p>Start only after you have reviewed the fit. We will show actual server events here — not simulated reasoning.</p></div>}{runState === "running" && <div className="hs-working-line"><i /><span>Waiting for the next real agent event…</span></div>}{runState === "failed" && <button type="button" className="hs-button hs-button-secondary hs-button-small" onClick={() => runId && void restoreRun(runId)}>Reconnect activity <Icon name="refresh" size={15} /></button>}</section><section className={`hs-resume-column ${agentTab === "resume" ? "mobile-current" : ""}`}><div className="hs-room-heading"><div><span>RESUME &amp; EVIDENCE</span><h3>{candidate?.headline || "Your source CV"}</h3></div></div>{patches.length ? <div className="hs-room-patches">{patches.slice(0, 3).map((patch, index) => <article key={patchKey(patch, index)}><small>{patch.section}</small><p>{patch.proposed}</p><span>{patch.evidence_ids.join(" · ")}</span></article>)}</div> : <div className="hs-resume-mini"><Icon name="resume" size={22} /><p>Proposed, evidence-linked edits will appear here when the workflow reaches the review stage.</p></div>}<div className="hs-evidence-mini"><span>Evidence ledger</span>{candidate?.evidence.slice(0, 3).map((item) => <button type="button" key={item.evidence_id} onClick={() => setView("evidence")}><b>{item.evidence_id}</b><p>{item.source_text}</p></button>)}</div></section></div>;
     return <>{!compact && <div className="hs-agent-tabs" role="tablist" aria-label="Agent room mobile sections">{(["agents", "activity", "resume"] as const).map((tab) => <button key={tab} role="tab" aria-selected={agentTab === tab} onClick={() => setAgentTab(tab)}>{tab === "agents" ? "Agents" : tab === "activity" ? "Activity" : "Resume"}</button>)}</div>}{room}</>;
   }
 
   function renderAgentsStage() {
-    return <section className="hs-work-card hs-agents-stage">{renderJobSummary()}<div className="hs-stage-heading"><span className="hs-stage-icon"><Icon name="team" size={20} /></span><div><p className="hs-eyebrow">STEP 4 · AI COLLABORATION</p><h2>Invite your evidence team in.</h2><p>Each update comes from the live run. No agent will present unsupported experience as fact.</p></div>{runState !== "running" && runState !== "awaiting_approval" && runState !== "approved" && <button type="button" className="hs-button hs-button-primary hs-stage-cta" onClick={() => void startRun()} disabled={startingRun || service === "offline"}>{startingRun ? "Starting agents…" : runState === "failed" ? "Restart workflow" : "Start evidence workflow"}<Icon name="arrow-right" size={16} /></button>}</div>{renderAgentRoom()}</section>;
+    const canStart = runState !== "running" && runState !== "awaiting_approval" && runState !== "approved";
+    return <section className="hs-work-card hs-agents-stage">
+      {renderJobSummary()}
+      <div className="hs-stage-heading"><span className="hs-stage-icon"><Icon name="team" size={20} /></span><div><p className="hs-eyebrow">STEP 4 · AI COLLABORATION</p><h2>Invite your evidence team in.</h2><p>Each update comes from the live run. No agent will present unsupported experience as fact.</p></div>{canStart && <button type="button" className="hs-button hs-button-primary hs-stage-cta" onClick={() => void startRun()} disabled={startingRun || service === "offline"}>{startingRun ? "Starting agents…" : runState === "failed" ? "Restart workflow" : useGenerative && generativeAvailable ? "Start Gemini-guided workflow" : "Start evidence workflow"}<Icon name="arrow-right" size={16} /></button>}</div>
+      {canStart && renderGenerativeOption()}
+      {renderAgentRoom()}
+    </section>;
   }
 
   function renderReviewStage() {

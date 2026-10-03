@@ -5,6 +5,7 @@ import copy
 import ipaddress
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -249,6 +250,32 @@ async def normalize_candidate(payload: CandidateInput) -> dict[str, Any]:
 MAX_UPLOAD_BYTES = 6 * 1024 * 1024
 
 
+_LOCATION_LABEL = re.compile(r"^(?:location|based\s+in|based)\s*[:\-]?\s*(?P<value>.+)$", re.I)
+_PAKISTAN_CITY_LOCATION = re.compile(r"^(?P<value>[A-Za-z][A-Za-z .'-]{1,70},\s*Pakistan)\b", re.I)
+
+
+def _location_from_resume_lines(lines: list[str]) -> str:
+    """Read an explicit, human-written location without guessing from a name.
+
+    The parser intentionally limits itself to common CV forms rather than using
+    geocoding or inference: ``Rawalpindi, Pakistan``, ``Location: Rawalpindi``,
+    and ``Based in: Rawalpindi`` are all literal applicant text.
+    """
+    for raw_line in lines[:16]:
+        line = re.sub(r"^[\s•\-–—]+", "", raw_line).strip()
+        if not line:
+            continue
+        labelled = _LOCATION_LABEL.match(line)
+        if labelled:
+            value = re.split(r"\s*(?:\||•|·)\s*", labelled.group("value"), maxsplit=1)[0].strip(" ,;-")
+            if 2 <= len(value) <= 90:
+                return value
+        pakistan_city = _PAKISTAN_CITY_LOCATION.match(line)
+        if pakistan_city:
+            return pakistan_city.group("value").strip()
+    return "Location not specified"
+
+
 def _candidate_from_text(text: str, filename: str) -> CandidateInput:
     clean_lines = [line.strip() for line in text.replace("\r", "").split("\n") if line.strip()]
     if len(text.strip()) < 80:
@@ -263,7 +290,7 @@ def _candidate_from_text(text: str, filename: str) -> CandidateInput:
     return CandidateInput(
         name=name,
         headline=headline,
-        location="Location not specified",
+        location=_location_from_resume_lines(clean_lines),
         preferences=["Imported CV"],
         resume_text=text[:50000],
         evidence=evidence,

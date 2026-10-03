@@ -66,6 +66,34 @@ class EvidenceEngineTests(unittest.TestCase):
         self.assertEqual(match["score"], 0)
         self.assertEqual(match["coverage"], 0)
 
+    def test_resume_extraction_preserves_metrics_and_finds_docker_in_sentences_and_skill_lists(self):
+        resume = """Hussain Ahmed
+Full-Stack Developer
+PROJECTS
+Containerized services with Docker and PostgreSQL for an API used by 2,000 users.
+Improved onboarding by 40 percent and supported $20,000 in annual subscriptions over 3.5 years.
+SKILLS
+Python, FastAPI, PostgreSQL, Docker, React, TypeScript
+"""
+        evidence = extract_evidence_from_resume(resume)
+        docker_items = [item for item in evidence if "Docker" in item["skills"]]
+        self.assertGreaterEqual(len(docker_items), 2, evidence)
+        metric_text = "\n".join(item["metric"] for item in evidence if item.get("metric"))
+        self.assertIn("2,000 users", metric_text)
+        self.assertIn("40 percent", metric_text)
+        self.assertIn("$20,000", metric_text)
+        self.assertIn("3.5 years", metric_text)
+        candidate = {"evidence": evidence}
+        match = score_job({"must_have": ["Docker", "FastAPI", "PostgreSQL"], "preferred": []}, candidate)
+        self.assertEqual({item["skill"] for item in match["verified_strengths"]}, {"Docker", "FastAPI", "PostgreSQL"})
+        self.assertNotIn("Docker", {item["skill"] for item in match["gaps"]})
+        inline_skill_list = extract_evidence_from_resume("SKILLS: Docker\n")
+        self.assertEqual(inline_skill_list[0]["skills"], ["Docker"])
+        sentence_level = extract_evidence_from_resume("In my capstone, I used Docker to package the service for classmates.\n")
+        self.assertEqual(sentence_level[0]["skills"], ["Docker"])
+        project_stack = extract_evidence_from_resume("PROJECTS\nTech stack: Docker, FastAPI\n")
+        self.assertTrue({"Docker", "FastAPI"}.issubset(set(project_stack[0]["skills"])))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ import httpx
 
 from app.data import DEMO_CANDIDATE, DEMO_JOBS
 from app.documents import _application_bullets, build_docx, build_pdf, export_readiness
-from app.evidence import build_cover_letter, build_safe_patches, cover_letter_evidence_ids, score_job, validate_patches
+from app.evidence import build_cover_letter, build_safe_patches, cover_letter_evidence_ids, extract_evidence_from_resume, score_job, validate_patches
 from app.main import _candidate_from_text, app, candidate_as_dict, execute_evidence_lab
 from app.schemas import CandidateInput, RunStatus
 main_module = importlib.import_module("app.main")
@@ -57,6 +57,43 @@ class RealWorkflowTests(unittest.TestCase):
         self.assertEqual(DEMO_CANDIDATE["location"], "Rawalpindi, Pakistan")
         self.assertEqual(CandidateInput().name, "Hussain Ahmed")
         self.assertEqual(CandidateInput().headline, "Full-Stack Developer · Python · FastAPI · React · PostgreSQL")
+
+    def test_cv_parser_keeps_common_explicit_pakistan_locations(self):
+        for line, expected in [
+            ("Rawalpindi, Pakistan", "Rawalpindi, Pakistan"),
+            ("Islamabad, Pakistan", "Islamabad, Pakistan"),
+            ("Lahore, Pakistan", "Lahore, Pakistan"),
+            ("Location: Rawalpindi", "Rawalpindi"),
+            ("Based in: Rawalpindi", "Rawalpindi"),
+        ]:
+            with self.subTest(line=line):
+                candidate = _candidate_from_text(f"Hussain Ahmed\nFull-Stack Developer\n{line}\nEXPERIENCE\nBuilt and containerized a Docker service for a student platform used by project collaborators.\nSKILLS\nDocker", "hussain.txt")
+                self.assertEqual(candidate.location, expected)
+
+    def test_hussain_style_cv_regression_keeps_location_metrics_and_docker_proof(self):
+        resume = """Hussain Ahmed
+Full-Stack Developer
+Rawalpindi, Pakistan
+EXPERIENCE
+• Containerized a FastAPI service with Docker and PostgreSQL for 2,000 users.
+• Improved reporting by 40 percent and supported $20,000 in subscriptions over 3.5 years.
+SKILLS
+Python, FastAPI, PostgreSQL, Docker
+"""
+        candidate = _candidate_from_text(resume, "hussain-ahmed.txt")
+        self.assertEqual(candidate.location, "Rawalpindi, Pakistan")
+        metrics = "\n".join(item.metric or "" for item in candidate.evidence)
+        for expected in ("2,000 users", "40 percent", "$20,000", "3.5 years"):
+            self.assertIn(expected, metrics)
+        match = score_job({"must_have": ["Docker", "FastAPI", "PostgreSQL"], "preferred": []}, candidate.model_dump())
+        self.assertIn("Docker", {item["skill"] for item in match["verified_strengths"]})
+        self.assertNotIn("Docker", {item["skill"] for item in match["gaps"]})
+        self.assertEqual(extract_evidence_from_resume("SKILLS: Docker")[0]["skills"], ["Docker"])
+        response = TestClient(app).post("/api/candidate/upload", files={"file": ("hussain-ahmed.txt", resume.encode("utf-8"), "text/plain")})
+        self.assertEqual(response.status_code, 200, response.text)
+        uploaded = response.json()["candidate"]
+        self.assertEqual(uploaded["location"], "Rawalpindi, Pakistan")
+        self.assertIn("Docker", {skill for item in uploaded["evidence"] for skill in item["skills"]})
 
     def test_public_board_urls_extract_only_the_public_board_identifier(self):
         self.assertEqual(greenhouse_token("https://boards.greenhouse.io/stripe/jobs/123"), "stripe")

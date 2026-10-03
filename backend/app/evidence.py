@@ -319,37 +319,120 @@ def build_cover_letter(job: dict[str, Any], candidate: dict[str, Any], match: di
     return "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
 
 
-def extract_evidence_from_resume(resume_text: str) -> list[dict[str, Any]]:
-    """Turn user-provided resume text into a reviewable evidence ledger.
+# Preserve literal numbers exactly as supplied. A candidate's "2,000 users"
+# must never become "000 users" simply because a comma is not part of a basic
+# numeric regex. The expression intentionally covers only clear measures, not
+# date ranges or arbitrary numbers in a CV.
+METRIC_PATTERN = re.compile(
+    r"(?:"
+    r"[$€£]\s?\d{1,3}(?:,\d{3})*(?:\.\d+)?"
+    r"|(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:%|percent|users?|customers?|clients?|hours?|days?|weeks?|months?|years?|ms|seconds?|minutes?|records?|requests?|downloads?)"
+    r")",
+    re.I,
+)
 
-    This is deliberately conservative: it extracts literal statements rather than
-    inferring achievements. The candidate can inspect/edit them before a live LLM
-    is ever involved.
+_SECTION_TITLES = {
+    "experience": "Experience",
+    "work experience": "Experience",
+    "professional experience": "Experience",
+    "projects": "Projects",
+    "project experience": "Projects",
+    "skills": "Skills",
+    "technical skills": "Technical skills",
+    "tech stack": "Technical skills",
+    "technologies": "Technical skills",
+    "tools": "Technical skills",
+}
+_SKILL_SECTIONS = {"Skills", "Technical skills"}
+_SKILL_LIST_PREFIX = re.compile(r"^\s*(?:skills?|technical\s+skills?|tech(?:nology|nologies)?|tech\s+stack|tools?)\s*[:\-]", re.I)
+# Sentence-level CV prose often begins with "I" or a project name rather than
+# an action verb. Require an explicit technical-work signal anywhere in the
+# line; this still avoids treating a bare headline such as "Docker developer"
+# as evidence.
+_TECHNICAL_SENTENCE_SIGNAL = re.compile(
+    r"\b(?:built|developed|designed|implemented|created|led|managed|delivered|improved|reduced|optimized|automated|dockerized|containerized|deployed|configured|used|using|utilized|worked\s+with|tested|maintained|migrated|integrated|analyzed|wrote|launched|supported|contributed|experience\s+with)\b",
+    re.I,
+)
+
+
+def _resume_section(line: str) -> str | None:
+    compact = normalize(re.sub(r"[:\-–—]+$", "", line))
+    return _SECTION_TITLES.get(compact)
+
+
+def _skills_mentioned_in(line: str) -> list[str]:
+    text = normalize(line)
+    found = []
+    for normalized_skill, aliases in SKILL_ALIASES.items():
+        if any(has_alias(text, alias) for alias in aliases):
+            # Preserve conventional technical capitalization in the ledger/UI.
+            found.append(SKILL_LABELS.get(normalized_skill, normalized_skill.title()))
+    return sorted(set(found))
+
+
+def extract_evidence_from_resume(resume_text: str) -> list[dict[str, Any]]:
+    """Create a literal, reviewable work-example ledger from a CV.
+
+    In addition to action/impact bullets, applicants often give direct tool
+    proof in project tech stacks and skills lists. Those literal CV lines are
+    useful evidence when the named skill is actually present; this function
+    records them without inventing scope, ownership, or outcomes.
     """
     lines = [re.sub(r"^[\s•\-–—]+", "", line).strip() for line in resume_text.splitlines()]
     # A headline such as "Frontend developer" may contain a taxonomy alias but
-    # is not proof of work. Promote only literal action/impact statements.
-    action = re.compile(r"^(?:built|developed|designed|implemented|created|led|managed|owned|delivered|improved|reduced|increased|optimized|automated|collaborated|dockerized|deployed|tested|maintained|migrated|integrated|analyzed|wrote|launched|supported|contributed)\b", re.I)
-    metric_signal = re.compile(r"(?:\d+(?:\.\d+)?\s*%|\d+\s*(?:ms|hours?|days?|users?))", re.I)
-    statements = [line for line in lines if len(line) >= 18 and line.upper() != line and (action.search(line) or metric_signal.search(line))]
+    # is not proof of work. Conversely, "Containerized services with Docker"
+    # is a literal action statement and must not be dropped.
+    action = re.compile(
+        r"^(?:built|developed|designed|implemented|created|led|managed|owned|delivered|improved|reduced|increased|optimized|automated|collaborated|dockerized|containerized|deployed|configured|used|utilized|worked\s+with|tested|maintained|migrated|integrated|analyzed|wrote|launched|supported|contributed)\b",
+        re.I,
+    )
     evidence: list[dict[str, Any]] = []
-    for line in statements:
-        text = normalize(line)
-        found = []
-        for normalized_skill, aliases in SKILL_ALIASES.items():
-            if any(has_alias(text, alias) for alias in aliases):
-                # Preserve conventional technical capitalization in the ledger/UI.
-                found.append(SKILL_LABELS.get(normalized_skill, normalized_skill.title()))
-        metric_match = re.search(r"(?:\d+(?:\.\d+)?\s*%|\d+\s*(?:ms|hours?|days?|users?))", line, re.I)
-        if found or metric_match:
-            evidence.append({
-                "evidence_id": f"cv_{len(evidence)+1:02d}",
-                "source_section": "Candidate-provided resume",
-                "source_text": line,
-                "skills": sorted(set(found)),
-                "metric": metric_match.group(0) if metric_match else None,
-                "status": "verified",
-            })
+    seen_lines: set[str] = set()
+    section = "Candidate-provided resume"
+
+    for line in lines:
+        if not line:
+            continue
+        heading = _resume_section(line)
+        if heading:
+            section = heading
+            continue
+        if len(line) < 3:
+            continue
+
+        found = _skills_mentioned_in(line)
+        metric_matches = [match.group(0) for match in METRIC_PATTERN.finditer(line)]
+        is_action = bool(action.search(line))
+        # A literal skill/tech list is direct self-reported CV evidence. We do
+        # not infer a skill from generic words such as "container architecture";
+        # a known alias must appear on the original line.
+        is_skill_list = bool(found) and (
+            section in _SKILL_SECTIONS
+            or bool(_SKILL_LIST_PREFIX.match(line))
+            or (len(found) >= 2 and any(separator in line for separator in (",", "|", ";", ":")))
+        )
+        is_technical_sentence = bool(found) and bool(_TECHNICAL_SENTENCE_SIGNAL.search(line))
+        if not (is_action or metric_matches or is_skill_list or is_technical_sentence):
+            continue
+        if not found and not metric_matches:
+            # An action with no named skill or measurable outcome is too broad
+            # to become a reusable application claim.
+            continue
+
+        dedupe_key = normalize(line)
+        if dedupe_key in seen_lines:
+            continue
+        seen_lines.add(dedupe_key)
+        evidence.append({
+            "evidence_id": f"cv_{len(evidence)+1:02d}",
+            "source_section": section,
+            "source_text": line,
+            "skills": found,
+            # A ledger row has one metric field, so retain every literal measure
+            # in source order rather than silently discarding later values.
+            "metric": "; ".join(metric_matches) if metric_matches else None,
+            "status": "verified",
+        })
         if len(evidence) >= 12:
             break
     return evidence

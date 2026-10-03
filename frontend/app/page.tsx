@@ -30,7 +30,10 @@ type RunCheckpoint = { id: string; status: string; selected_job_id: string; mode
 const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE;
 const API = configuredApiBase === undefined ? "/backend" : configuredApiBase.replace(/\/+$/, "");
 const RUN_STORAGE_KEY = "hireswarm.activeRunId";
-type ServiceStatus = "checking" | "online" | "offline";
+// "demo-only" is an intentional, user-selected sample boundary. It is not a
+// synonym for a failed health check: "offline" means the live API was tried and
+// confirmed unavailable, while "checking" never blocks a new user's first step.
+type ServiceStatus = "checking" | "online" | "offline" | "demo-only";
 type ServiceHealth = { ok?: boolean; service?: string; mode?: string; optional_crewai?: boolean };
 
 // React development effects and impatient repeat clicks should not multiply
@@ -128,6 +131,7 @@ const fallbackCandidate: Candidate = {
     { evidence_id: "ev_03", source_section: "Project", source_text: "Built a FastAPI service with JWT authentication and PostgreSQL.", skills: ["FastAPI", "Python", "PostgreSQL"], status: "verified" },
     { evidence_id: "ev_04", source_section: "Project", source_text: "Dockerized the development environment and documented local setup.", skills: ["Docker"], status: "verified" },
     { evidence_id: "ev_05", source_section: "Project", source_text: "Reduced manual reporting time by 40% through an analytics dashboard.", skills: ["React", "Analytics"], metric: "40% reporting-time reduction", status: "verified" },
+    { evidence_id: "ev_06", source_section: "Experience", source_text: "Collaborated with three developers using Git and code reviews.", skills: ["Git", "Code review", "Team collaboration"], status: "verified" },
   ],
 };
 
@@ -231,6 +235,10 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null);
+  // A first click can confirm health at action time. This is deliberately
+  // separate from the initial bootstrap so controls are useful immediately.
+  const [isActionChecking, setIsActionChecking] = useState(false);
+  const [practiceFocus, setPracticeFocus] = useState<string | null>(null);
   const [isApproving, setIsApproving] = useState(false);
   const [isExporting, setIsExporting] = useState<"docx" | "pdf" | null>(null);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
@@ -255,25 +263,49 @@ export default function Home() {
   const proofItem = candidate.evidence.find((item) => item.metric) || candidate.evidence[0];
   const candidateFirstName = candidate.name.trim().split(/\s+/)[0] || "there";
   const serviceOnline = serviceStatus === "online";
+  // Keep controls enabled while a health request is in flight. A confirmed
+  // outage or an intentional sample-only choice is the only live-action pause.
+  const canStartLiveAction = serviceStatus === "online" || serviceStatus === "checking";
   const crewaiAvailable = Boolean(serviceHealth?.optional_crewai);
   const runIsActive = runState === "running";
   const application = applicationProgress(runState, usingDemoProfile, Boolean(selectedIsPractice), Boolean(market));
-  const serviceCopy = serviceStatus === "online" ? "Service connected" : serviceStatus === "checking" ? "Checking connection" : "Service unavailable";
+  const serviceCopy = serviceStatus === "online" ? "Workspace ready" : serviceStatus === "checking" ? "Preparing workspace" : serviceStatus === "demo-only" ? "Sample workspace" : "Live workspace unavailable";
 
   async function checkService(showSuccess = false) {
     setServiceStatus("checking");
     try {
-      const health = await requestJson<ServiceHealth>(`${API}/healthz`);
+      // cachedGet shares the bootstrap request when a user acts immediately,
+      // while a manual retry still asks health to confirm readiness again.
+      const health = await cachedGet<ServiceHealth>(`${API}/healthz`, 0);
       if (!health.ok) throw new Error("The workspace service did not confirm that it is ready.");
       setServiceHealth(health);
       setServiceStatus("online");
-      if (showSuccess) setNotice("Workspace service is connected. You can import a CV, add a role, or start a rehearsal.");
+      if (showSuccess) setNotice("Live workspace ready. You can import a CV, add a role, or start a rehearsal.");
       return true;
     } catch (error) {
       setServiceStatus("offline");
-      if (showSuccess) setNotice(error instanceof Error ? error.message : "The workspace service is unavailable. Please retry shortly.");
+      if (showSuccess) setNotice(error instanceof Error ? error.message : "Live workspace temporarily unavailable. You can still explore the demo.");
       return false;
     }
+  }
+
+  async function requireLiveWorkspace(actionName: string): Promise<boolean> {
+    if (serviceStatus === "online") return true;
+    if (serviceStatus === "checking") {
+      setIsActionChecking(true);
+      setNotice(`Checking the live workspace before ${actionName}…`);
+      const ready = await checkService(false);
+      setIsActionChecking(false);
+      if (ready) return true;
+      setNotice("Live workspace temporarily unavailable. You can still explore the demo.");
+      return false;
+    }
+    if (serviceStatus === "demo-only") {
+      setNotice("You are exploring the sample workflow. Try the live workspace when you are ready to import a CV, use a real role, or export a packet.");
+      return false;
+    }
+    explainServiceUnavailable();
+    return false;
   }
 
   useEffect(() => {
@@ -290,11 +322,13 @@ export default function Home() {
         setSelectedJobId((previous) => previous || jobsResult.value.jobs[0].id);
       }
       if (candidateLoaded && candidateResult.value.evidence.length) setCandidate(candidateResult.value);
-      if (healthResult.status === "fulfilled" && healthResult.value.ok && (jobsLoaded || candidateLoaded)) {
+      // Health is the connection contract. Demo fixtures are helpful but their
+      // fetch must never turn a healthy API into a false "paused" workspace.
+      if (healthResult.status === "fulfilled" && healthResult.value.ok) {
         setServiceHealth(healthResult.value);
-        setServiceStatus("online");
+        setServiceStatus((current) => current === "demo-only" ? "demo-only" : "online");
       } else {
-        setServiceStatus("offline");
+        setServiceStatus((current) => current === "demo-only" ? "demo-only" : "offline");
         // The persistent, labeled degraded-state banner carries this message.
         // Avoid duplicating it in the transient notice area where it can be
         // visually clipped by the command header on smaller viewports.
@@ -352,7 +386,7 @@ export default function Home() {
   }, [pathname]);
 
   function resetRun(nextView: WorkspaceView = "match") {
-    streamRef.current?.close(); runLockRef.current = false; window.sessionStorage.removeItem(RUN_STORAGE_KEY); setRunId(null); setRunState("idle"); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
+    streamRef.current?.close(); runLockRef.current = false; window.sessionStorage.removeItem(RUN_STORAGE_KEY); setRunId(null); setRunState("idle"); setPracticeFocus(null); setMarket(null); setTurns([]); setPatches([]); setCoverageAfter(null); setCoverLetter(""); setCoverLetterEvidenceIds([]); setExportReadiness(null); setEvents([]); setActiveAgent("Ready when you are"); setShowCoverLetter(false); setView(nextView);
   }
 
   function scrollToShortlist() {
@@ -382,21 +416,21 @@ export default function Home() {
     setRunMode(mode);
     setShowEngineMenu(false);
     setNotice(mode === "crewai"
-      ? "Guided AI review is available for this run. Evidence checks and your approval still control every claim and export."
+      ? "Guided AI review is available for this run. Proof checks and your approval still control every claim and export."
       : "Your application workspace is selected. It checks each claim against your work examples before review.");
   }
 
   function explainServiceUnavailable() {
-    setNotice("The live workspace API is unavailable. Demo fixtures are visible only for orientation; imports, live role discovery, rehearsals, approval, and exports are paused until the service reconnects.");
+    setNotice("Live workspace temporarily unavailable. You can still explore the demo.");
   }
 
   function explainRunActive() {
-    setNotice("A practice session is still active. Wait for its review before changing your CV, current job, or exports.");
+    setNotice("A practice session is still active. Wait for its review before changing your CV, current application, or exports.");
   }
 
-  function openRoleFinder() {
-    if (!serviceOnline) return explainServiceUnavailable();
+  async function openRoleFinder() {
     if (runIsActive) return explainRunActive();
+    if (!await requireLiveWorkspace("opening public roles")) return;
     setShowLiveFinder(true);
   }
 
@@ -420,45 +454,54 @@ export default function Home() {
     scrollToWorkspacePanel();
   }
 
+  function continueWithDemo() {
+    if (runIsActive) return explainRunActive();
+    setServiceStatus("demo-only");
+    setCandidate(fallbackCandidate);
+    setUsingDemoProfile(true);
+    const demoRole = jobs.find((job) => job.origin === "demo_fixture") || fallbackJobs[0];
+    setJobs((current) => current.some((job) => job.id === demoRole.id) ? current : [demoRole, ...current]);
+    setSelectedJobId(demoRole.id);
+    resetRun("match");
+    setNotice("Sample-only workspace active. Hussain Ahmed’s profile and the demo role are examples only; live imports, role search, practice, approval, and export remain unavailable.");
+    scrollToWorkspacePanel();
+  }
+
   function tryDemoWorkspace() {
-    if (!serviceOnline) return explainServiceUnavailable();
+    if (runIsActive) return explainRunActive();
+    if (serviceStatus === "offline") setServiceStatus("demo-only");
     useDemoRole();
     if (!usingDemoProfile) setNotice("Demo role selected. Your own CV stays unchanged; use the demo profile option only if you want to replace this local sample view.");
   }
 
-  function helpApplyToJob() {
-    if (!serviceOnline) return explainServiceUnavailable();
+  async function helpApplyToJob() {
     if (usingDemoProfile) {
       setShowIntake(true);
       setNotice("First, add your CV so every recommendation is based on your own work.");
       return;
     }
     if (selectedIsPractice) {
-      openRoleFinder();
-      setNotice("Choose a real public role or paste a listing you want to prepare for.");
+      await openRoleFinder();
       return;
     }
     setView("match");
     scrollToWorkspacePanel();
   }
 
-  function startFromHero() {
-    if (!serviceOnline) return explainServiceUnavailable();
+  async function startFromHero() {
     if (usingDemoProfile) {
       setShowIntake(true);
       setNotice("Start with your CV so every fit check and answer is based on your own experience.");
       return;
     }
     if (selectedIsPractice) {
-      setShowLiveFinder(true);
-      setNotice("Choose a live public role or paste your own job brief before checking a real fit.");
+      await openRoleFinder();
       return;
     }
-    void startRehearsal();
+    await startRehearsal();
   }
 
   function startSampleFitCheck() {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (!selectedIsPractice) return startFromHero();
     setNotice(usingDemoProfile
       ? "This is a safe demo using sample data. Nothing is submitted."
@@ -466,8 +509,23 @@ export default function Home() {
     void startRehearsal();
   }
 
+  function addEvidenceForGap(skill: string) {
+    if (runIsActive) return explainRunActive();
+    setShowIntake(true);
+    setNotice(`Add a literal CV line, project stack, or skills-list entry only if it genuinely supports ${skill}. Do not turn related experience into a direct claim.`);
+  }
+
+  function practiceGap(skill: string) {
+    if (runIsActive) return explainRunActive();
+    setPracticeFocus(skill);
+    setView("rehearse");
+    setActiveNavigation("practice");
+    setNotice(`Practice an honest answer for ${skill}: explain what you can support, any related work, and the next step you are taking.`);
+    scrollToWorkspacePanel();
+  }
+
   function openBlankJobForm() {
-    if (!serviceOnline) return explainServiceUnavailable();
+    if (serviceStatus === "offline" || serviceStatus === "demo-only") return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
     setManualTitle(""); setManualCompany(""); setManualLocation(""); setManualUrl(""); setManualDescription("");
     setShowJobForm(true);
@@ -478,6 +536,7 @@ export default function Home() {
     if (hasRoleDetail(current)) return current || null;
     const cached = jobDetailCacheRef.current.get(jobId);
     if (cached) return cached;
+    if (!await requireLiveWorkspace("loading this role's published details")) return null;
 
     let pending = jobDetailRequestRef.current.get(jobId);
     if (!pending) {
@@ -511,7 +570,6 @@ export default function Home() {
   }
 
   async function adaptSelectedJob() {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
     if (!selectedJob) return openBlankJobForm();
     const job = hasRoleDetail(selectedJob) ? selectedJob : await loadJobDetail(selectedJob.id);
@@ -594,15 +652,15 @@ export default function Home() {
   }
 
   async function startRehearsal() {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (!selectedJob || runIsActive || runLockRef.current) return;
+    if (!await requireLiveWorkspace("starting the fit check")) return;
     // A live search card is intentionally only a compact summary. Ensure the
     // applicant has explicitly loaded its source text before evidence work.
     const targetJob = hasRoleDetail(selectedJob) ? selectedJob : await loadJobDetail(selectedJob.id);
     if (!targetJob) return;
     if (runMode === "crewai" && !crewaiAvailable) {
       setRunMode("evidence_lab");
-      setNotice("Guided AI review is unavailable on this workspace, so HireSwarm will use its standard evidence checks.");
+      setNotice("Guided AI review is unavailable on this workspace, so HireSwarm will use its standard proof checks.");
     }
     resetRun("rehearse");
     runLockRef.current = true;
@@ -629,8 +687,8 @@ export default function Home() {
   }
 
   async function approvePacket() {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (!runId || runIsActive || runState !== "awaiting_approval" || approvalLockRef.current) return;
+    if (!await requireLiveWorkspace("saving your approval")) return;
     approvalLockRef.current = true;
     setIsApproving(true);
     try {
@@ -644,8 +702,8 @@ export default function Home() {
   }
 
   async function exportPacket(format: "docx" | "pdf") {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (!runId || runIsActive || runState !== "approved" || exportLockRef.current) return;
+    if (!await requireLiveWorkspace(`preparing your ${format.toUpperCase()} export`)) return;
     exportLockRef.current = true;
     setIsExporting(format);
     try {
@@ -680,8 +738,8 @@ export default function Home() {
 
   async function addManualJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
+    if (!await requireLiveWorkspace("adding your pasted role")) return;
     if (manualTitle.trim().length < 2 || manualCompany.trim().length < 2 || manualDescription.trim().length < 20) {
       setNotice("Add a role title, company, and at least a short role description before creating a target.");
       return;
@@ -710,8 +768,8 @@ export default function Home() {
   }
 
   async function discoverPublicRoles(query: string, source: "all" | "remotive" | "arbeitnow") {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
+    if (!await requireLiveWorkspace("searching public roles")) return;
     const cleanQuery = query.trim();
     if (cleanQuery.length < 2) {
       setNotice("Enter at least 2 characters for a live-role search, for example “Python” or “product designer”.");
@@ -730,8 +788,8 @@ export default function Home() {
   }
 
   async function connectPublicBoard(source: "greenhouse" | "lever", board: string) {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
+    if (!await requireLiveWorkspace("reading the public board")) return;
     try {
       const data = await requestJson<SourceResponse>(`${API}/api/jobs/public-board`, {
         method: "POST",
@@ -748,9 +806,9 @@ export default function Home() {
   }
 
   async function importResume(file: File) {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
     setIsImporting(true);
+    if (!await requireLiveWorkspace("importing your CV")) { setIsImporting(false); return; }
     try {
       const form = new FormData();
       form.append("file", file);
@@ -766,9 +824,9 @@ export default function Home() {
   }
 
   async function analyzeResume() {
-    if (!serviceOnline) return explainServiceUnavailable();
     if (runIsActive) return explainRunActive();
     setIsAnalyzing(true);
+    if (!await requireLiveWorkspace("refreshing your work examples")) { setIsAnalyzing(false); return; }
     try {
       const data = await requestJson<Candidate | { detail?: string }>(`${API}/api/candidate/normalize`, {
         method: "POST",
@@ -803,8 +861,8 @@ export default function Home() {
       <div className="sidebar-brand"><div className="mark">h.</div><span>hire<span>swarm</span></span></div>
       <nav className="primary-nav" aria-label="Main navigation">
         <Link prefetch={false} href="/workspace" className={cx("nav-item", activeNavigation === "workspace" && "active")} onClick={(event) => { event.preventDefault(); navigate("workspace"); }}><NavGlyph type="grid" />Home</Link>
-        <Link prefetch={false} href="/applications" className={cx("nav-item", activeNavigation === "applications" && "active")} onClick={(event) => { event.preventDefault(); navigate("applications"); }}><NavGlyph type="briefcase" />My applications <small>{jobs.length}</small></Link>
-        <button type="button" className="nav-item find-jobs-nav" onClick={openRoleFinder} disabled={!serviceOnline || runIsActive}><NavGlyph type="search" />Find jobs</button>
+        <Link prefetch={false} href="/applications" className={cx("nav-item", activeNavigation === "applications" && "active")} onClick={(event) => { event.preventDefault(); navigate("applications"); }}><NavGlyph type="briefcase" />{inDemoWorkspace ? "Demo applications" : "My applications"} <small>{jobs.length}</small></Link>
+        <button type="button" className="nav-item find-jobs-nav" onClick={() => void openRoleFinder()} disabled={runIsActive}><NavGlyph type="search" />Find jobs</button>
         <Link prefetch={false} href="/practice" className={cx("nav-item", activeNavigation === "practice" && "active")} onClick={(event) => { event.preventDefault(); navigate("practice"); }}><NavGlyph type="chat" />Practice</Link>
         <Link prefetch={false} href="/documents" className={cx("nav-item", activeNavigation === "documents" && "active")} onClick={(event) => { event.preventDefault(); navigate("documents"); }}><NavGlyph type="document" />My documents</Link>
       </nav>
@@ -818,41 +876,42 @@ export default function Home() {
         <div className="header-context command-context" aria-label="Current workspace location">
           <div className="breadcrumb-stack">
             <span className="context-label">YOUR APPLICATION WORKSPACE</span>
-            <div><button className="crumb-button" onClick={() => navigate("applications")}>My applications</button><i>/</i><button className="crumb-target" onClick={adaptSelectedJob}>{selectedJob?.company || "Current job"}</button></div>
+            <div><button className="crumb-button" onClick={() => navigate("applications")}>{inDemoWorkspace ? "Demo applications" : "My applications"}</button><i>/</i><button className="crumb-target" onClick={adaptSelectedJob}>{selectedJob?.company || (selectedIsPractice ? "Demo role" : "Current application")}</button></div>
           </div>
-          <button className={cx("service-indicator", serviceStatus)} onClick={() => void checkService(true)} title="Check workspace connection" aria-label={`Workspace connection: ${serviceCopy}. Click to retry.`}>
-            <span className="service-pulse" /><span><b>{serviceStatus === "online" ? "Live workspace" : serviceStatus === "checking" ? "Connecting" : "Retry connection"}</b><small>{serviceStatus === "online" ? "API ready" : serviceStatus === "checking" ? "Checking API" : "Tap to reconnect"}</small></span><i aria-hidden="true">↻</i>
+          <button className={cx("service-indicator", serviceStatus)} onClick={() => void checkService(true)} title="Check live workspace connection" aria-label={`Workspace connection: ${serviceCopy}. Click to retry.`}>
+            <span className="service-pulse" /><span><b>{serviceStatus === "online" ? "Live workspace" : serviceStatus === "checking" ? "Preparing workspace" : serviceStatus === "demo-only" ? "Sample workspace" : "Live workspace unavailable"}</b><small>{serviceStatus === "online" ? "Ready for CVs and roles" : serviceStatus === "checking" ? "Actions stay available" : serviceStatus === "demo-only" ? "Examples only" : "Tap to try again"}</small></span><i aria-hidden="true">↻</i>
           </button>
         </div>
         <div className="header-actions command-actions" aria-label="Workspace controls">
           <div className="engine-switcher">
             <button className="command-action engine-trigger" onClick={() => setShowEngineMenu((open) => !open)} aria-expanded={showEngineMenu} aria-haspopup="menu" aria-label="Choose how your work examples are checked">
-              <span className="command-icon engine-symbol">✓</span><span className="mobile-command-label">Checks</span><span className="command-copy"><b>{runMode === "crewai" ? "Guided AI review" : "Evidence checks"}</b><small>How claims stay supported</small></span><span className="chevron">⌄</span>
+              <span className="command-icon engine-symbol">✓</span><span className="mobile-command-label">Proof</span><span className="command-copy"><b>{runMode === "crewai" ? "Guided AI review" : "Proof checks"}</b><small>How we verify your application</small></span><span className="chevron">⌄</span>
             </button>
             {showEngineMenu && <div className="engine-menu" role="menu" aria-label="Choose how your work examples are checked">
-              <p className="menu-overline">HOW WE CHECK YOUR WORK</p>
-              <button role="menuitem" className={cx(runMode === "evidence_lab" && "selected")} onClick={() => chooseEngine("evidence_lab")}><span className="engine-menu-symbol">✓</span><span><b>Your application workspace</b><small>Evidence checks · default</small></span>{runMode === "evidence_lab" && <i>Selected</i>}</button>
-              <button role="menuitem" className={cx(runMode === "crewai" && "selected")} onClick={() => chooseEngine("crewai")} disabled={!crewaiAvailable} aria-disabled={!crewaiAvailable}><span className="engine-menu-symbol">✦</span><span><b>Guided AI review</b><small>{crewaiAvailable ? "Optional extra narration" : "Unavailable here · standard checks will run"}</small></span>{runMode === "crewai" && crewaiAvailable && <i>Selected</i>}</button>
-              {!crewaiAvailable && <p className="engine-unavailable" role="note">Guided AI review is not configured on this deployment. Standard evidence checks remain fully available.</p>}
+              <p className="menu-overline">HOW WE VERIFY YOUR APPLICATION</p>
+              <button role="menuitem" className={cx(runMode === "evidence_lab" && "selected")} onClick={() => chooseEngine("evidence_lab")}><span className="engine-menu-symbol">✓</span><span><b>Your application workspace</b><small>Proof checks · default</small></span>{runMode === "evidence_lab" && <i>Selected</i>}</button>
+              <button role="menuitem" className={cx(runMode === "crewai" && "selected")} onClick={() => chooseEngine("crewai")} disabled={!crewaiAvailable} aria-disabled={!crewaiAvailable}><span className="engine-menu-symbol">✦</span><span><b>Guided AI review</b><small>{crewaiAvailable ? "Optional extra narration" : "Unavailable here · standard proof checks will run"}</small></span>{runMode === "crewai" && crewaiAvailable && <i>Selected</i>}</button>
+              {!crewaiAvailable && <p className="engine-unavailable" role="note">Guided AI review is not configured on this deployment. Standard proof checks remain fully available.</p>}
             </div>}
           </div>
           <button className="command-action guide-action" onClick={() => setShowGuide(true)} aria-label="Open how HireSwarm works guide"><span className="command-icon">?</span><span className="mobile-command-label">Guide</span><span className="command-copy"><b>Guide</b><small>See the path</small></span></button>
-          <button className="command-action find-action" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} aria-label="Find public roles" disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>Find jobs</b><small>{serviceOnline ? "Public sources" : "API paused"}</small></span></button>
-          <button className="command-action paste-action" onClick={openBlankJobForm} aria-label="Paste a job listing" disabled={!serviceOnline || runIsActive}><span className="command-icon">+</span><span className="mobile-command-label">Paste</span><span className="command-copy"><b>Paste role</b><small>Add your listing</small></span></button>
+          <button className="command-action find-action" onClick={() => void openRoleFinder()} aria-label="Find public roles" disabled={runIsActive} aria-disabled={runIsActive} aria-busy={isActionChecking}><span className="command-icon">⌕</span><span className="mobile-command-label">Roles</span><span className="command-copy"><b>{isActionChecking ? "Checking workspace…" : "Find jobs"}</b><small>{serviceStatus === "offline" || serviceStatus === "demo-only" ? "Demo still available" : "Public sources"}</small></span></button>
+          <button className="command-action paste-action" onClick={openBlankJobForm} aria-label="Paste a job listing" disabled={runIsActive}><span className="command-icon">+</span><span className="mobile-command-label">Paste</span><span className="command-copy"><b>Paste role</b><small>Add your listing</small></span></button>
           <button className="profile-button command-profile" onClick={() => setShowIntake(true)} aria-label="Open your profile"><span>{initials(candidate.name)}</span><i>Profile</i><small className="mobile-command-label">You</small></button>
         </div>
       </header>
       <div className="page-wrap">
         {serviceStatus === "offline" && <section className="service-outage" role="alert" aria-labelledby="service-outage-title">
           <div className="service-outage-icon" aria-hidden="true">!</div>
-          <div><p className="section-kicker">LIVE WORKSPACE PAUSED</p><h2 id="service-outage-title">We can’t reach your private workspace right now.</h2><p>Your visible profile and practice target are orientation-only fixtures. No import, role search, rehearsal, approval, or export will be represented as completed until the API reconnects.</p></div>
-          <button type="button" onClick={() => void checkService(true)} aria-label="Retry workspace connection">Retry connection</button>
+          <div><p className="section-kicker">LIVE WORKSPACE PAUSED</p><h2 id="service-outage-title">Live workspace temporarily unavailable.</h2><p>You can still explore the demo. Imports, live-role search, practice, approval, and exports remain paused until the workspace is ready again.</p></div>
+          <div className="service-outage-actions"><button type="button" onClick={() => void checkService(true)}>Try again</button><button type="button" className="outage-demo-action" onClick={continueWithDemo}>Continue with demo</button></div>
         </section>}
+        {serviceStatus === "demo-only" && <section className="demo-only-banner" role="note" aria-labelledby="demo-only-title"><div><p className="section-kicker">SAMPLE-ONLY WORKSPACE</p><h2 id="demo-only-title">You are exploring clearly labeled sample data.</h2><p>Hussain Ahmed’s profile and demo roles are for orientation only. No live CV import, role search, practice, approval, export, or application submission is available in this mode.</p></div><button type="button" className="outline-action small" onClick={() => void checkService(true)}>Try live workspace</button></section>}
         {notice && <div className="notice" role="status" aria-live="polite"><span>i</span><p>{notice}</p><button onClick={() => setNotice(null)} aria-label="Dismiss notice">Dismiss</button></div>}
         {inDemoWorkspace && <section className="demo-workspace-banner" role="note" aria-labelledby="demo-workspace-title">
           <div className="demo-banner-mark" aria-hidden="true">◎</div>
           <div><p>DEMO WORKSPACE</p><h2 id="demo-workspace-title">You are viewing a demo workspace.</h2><span>{usingDemoProfile ? "This example uses Hussain Ahmed’s sample profile. Nothing is submitted automatically." : "This current job is a demo role. Your CV stays yours, and nothing is submitted automatically."}</span></div>
-          <button className="outline-action small" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()}>{usingDemoProfile ? "Use my own CV" : "Add my CV"} <span>→</span></button>
+          <button className="outline-action small" onClick={() => setShowIntake(true)}>{usingDemoProfile ? "Use my own CV" : "Add my CV"} <span>→</span></button>
         </section>}
         <section className="command-hero welcome-hero" aria-labelledby="workspace-title">
           <div className="command-hero-copy">
@@ -861,8 +920,8 @@ export default function Home() {
             <p className="hero-value">Turn your real experience into a stronger job application.</p>
             <p className="command-hero-lede">Start with your CV, choose a role, and get a clear, evidence-backed application plan. HireSwarm shows what to highlight, what to explain, and what to improve — without inventing experience.</p>
             <div className="hero-cta-row">
-              <button className="hero-primary" disabled={runState === "running" || !serviceOnline} onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} aria-describedby={!serviceOnline ? "service-outage-title" : undefined}><span className="hero-primary-icon">↑</span><span><b>Start with my CV</b><small>Upload a PDF, DOCX, TXT, or paste your experience</small></span></button>
-              <button className="hero-secondary" onClick={tryDemoWorkspace} disabled={!serviceOnline || runIsActive}><span>DEMO</span><span><b>Try a demo</b><small>Explore a safe sample workspace first</small></span><i>→</i></button>
+              <button className="hero-primary" disabled={runState === "running"} onClick={() => setShowIntake(true)} aria-describedby={serviceStatus === "offline" ? "service-outage-title" : undefined}><span className="hero-primary-icon">↑</span><span><b>Start with my CV</b><small>Upload a PDF, DOCX, TXT, or paste your experience</small></span></button>
+              <button className="hero-secondary" onClick={tryDemoWorkspace} disabled={runIsActive}><span>DEMO</span><span><b>{inDemoWorkspace ? "Explore sample workflow" : "Try a demo"}</b><small>{inDemoWorkspace ? "Review clearly labeled sample work" : "Explore a safe sample workspace first"}</small></span><i>→</i></button>
             </div>
             <div className="hero-stat-row" aria-label={`${candidate.evidence.length} ${usingDemoProfile ? "sample" : "CV"} work examples, a current job, and approval required`}>
               <div><b>{candidate.evidence.length}</b><span>{usingDemoProfile ? "sample work examples" : "work examples"}</span></div><div><b>{selectedIsPractice ? "Demo" : "Current"}</b><span>{selectedIsPractice ? "role for practice" : "job to prepare for"}</span></div><div><b>100%</b><span>your final approval</span></div>
@@ -873,28 +932,30 @@ export default function Home() {
         <section className="intent-card" aria-labelledby="intent-title">
           <div className="intent-intro"><p className="section-kicker">START WITH A CLEAR NEXT STEP</p><h2 id="intent-title">What do you want to do?</h2><p>Choose one path. We will show the next useful action instead of leaving you in a blank dashboard.</p></div>
           <div className="intent-actions">
-            <button className="intent-action primary" onClick={helpApplyToJob} disabled={!serviceOnline || runIsActive}><span>01</span><div><b>Help me apply to a job</b><small>I have a role in mind and want to prepare for it.</small></div><i>→</i></button>
-            <button className="intent-action" onClick={openRoleFinder} disabled={!serviceOnline || runIsActive}><span>02</span><div><b>Help me find a suitable role</b><small>Show me public roles that match the work I want to do.</small></div><i>→</i></button>
-            <button className="intent-action" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive}><span>03</span><div><b>Improve my CV first</b><small>Turn my experience into stronger, supportable evidence.</small></div><i>→</i></button>
+            <button className="intent-action primary" onClick={() => void helpApplyToJob()} disabled={runIsActive}><span>01</span><div><b>Help me apply to a job</b><small>I have a role in mind and want to prepare for it.</small></div><i>→</i></button>
+            <button className="intent-action" onClick={() => void openRoleFinder()} disabled={runIsActive} aria-busy={isActionChecking}><span>02</span><div><b>{isActionChecking ? "Checking live workspace…" : "Help me find a suitable role"}</b><small>Show me public roles that match the work I want to do.</small></div><i>→</i></button>
+            <button className="intent-action" onClick={() => setShowIntake(true)} disabled={runIsActive}><span>03</span><div><b>Improve my CV first</b><small>Turn my experience into stronger, supportable evidence.</small></div><i>→</i></button>
           </div>
         </section>
-        <section className="start-flow" aria-labelledby="start-flow-title">
-          <div className="start-flow-heading"><p className="section-kicker">YOUR APPLICATION PATH</p><h2 id="start-flow-title">Start with the information only you can verify.</h2><p>Every claim stays connected to a CV line or work example. We do not invent experience or add unsupported claims.</p></div>
+        <section className="recommended-action-card" aria-labelledby="recommended-action-title">
+          <div><p className="section-kicker">RECOMMENDED NEXT ACTION</p><h2 id="recommended-action-title">{usingDemoProfile ? "Start with your CV." : selectedIsPractice ? "Choose a real role." : "Review your fit summary."}</h2><p>{usingDemoProfile ? "Your CV gives HireSwarm literal work examples to map to a role. You review every extracted example." : selectedIsPractice ? "Choose a public role or paste a listing to prepare a real application. The sample role is clearly labeled and never submitted." : "See highlighted evidence, honest gaps, and one practical plan for this application."}</p></div>
+          <button className="primary-action" onClick={() => void helpApplyToJob()} disabled={runIsActive}>{usingDemoProfile ? "Start with my CV" : selectedIsPractice ? "Choose a role" : "View fit summary"} <span>→</span></button>
+        </section>
+        <section className="start-flow concise-path" aria-labelledby="start-flow-title">
+          <div className="start-flow-heading"><p className="section-kicker">HOW IT WORKS</p><h2 id="start-flow-title">Three clear steps. One application at a time.</h2><p>Everything stays tied to work you can support. You remain in control of every claim, export, and submission.</p></div>
           <div className="start-flow-grid">
-            <article className="flow-step-card"><div className="flow-step-number">01</div><div><p className="flow-eyebrow">ADD YOUR EXPERIENCE</p><h3>First, tell us about your experience.</h3><p>We use your CV to find real examples of your work.</p></div><div className="flow-step-actions"><button className="primary-action small" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive}>Upload CV</button><button className="outline-action small" onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive}>Paste CV text</button><button className="text-action" onClick={useDemoProfile} disabled={runIsActive}>Use demo profile</button></div></article>
-            <article className="flow-step-card"><div className="flow-step-number">02</div><div><p className="flow-eyebrow">CHOOSE A JOB</p><h3>Which role are you preparing for?</h3><p>Use a public opening, paste a listing, or explore a clearly labeled demo role.</p></div><div className="flow-step-actions"><button className="primary-action small" onClick={openRoleFinder} disabled={!serviceOnline || runIsActive}>Find public roles</button><button className="outline-action small" onClick={openBlankJobForm} disabled={!serviceOnline || runIsActive}>Paste a job listing</button><button className="text-action" onClick={useDemoRole} disabled={runIsActive}>Use demo role</button></div></article>
+            <article className="flow-step-card"><div className="flow-step-number">01</div><div><p className="flow-eyebrow">ADD YOUR EXPERIENCE</p><h3>Bring in your CV.</h3><p>We find literal work examples and keep the source visible for your review.</p></div></article>
+            <article className="flow-step-card"><div className="flow-step-number">02</div><div><p className="flow-eyebrow">CHOOSE ONE ROLE</p><h3>Pick a target you trust.</h3><p>Use a public listing or paste a role. Sample roles always stay labeled as demos.</p></div></article>
+            <article className="flow-step-card"><div className="flow-step-number">03</div><div><p className="flow-eyebrow">USE THE PLAN</p><h3>Highlight proof. Address gaps honestly.</h3><p>Practice, review suggested wording, and approve before exporting anything.</p></div></article>
           </div>
         </section>
-        <section className="outcomes-card" aria-labelledby="outcomes-title">
-          <div><p className="section-kicker">WHAT YOU WILL GET</p><h2 id="outcomes-title">Useful material for one real application.</h2><p>HireSwarm prepares evidence-backed work. You review it and decide what to use.</p></div>
-          <ul><li><span>01</span><p><b>Fit report</b><small>A requirement-by-requirement skills and evidence map.</small></p></li><li><span>02</span><p><b>Honest gap plan</b><small>Missing proof stays visible, with practical next steps.</small></p></li><li><span>03</span><p><b>Stronger CV points</b><small>Tailored wording linked to your original work examples.</small></p></li><li><span>04</span><p><b>Cover letter points</b><small>A draft grounded in the experience you can support.</small></p></li><li><span>05</span><p><b>Interview practice</b><small>Role-specific questions and evidence-based answer guidance.</small></p></li><li><span>06</span><p><b>Final packet</b><small>PDF or DOCX export only after your approval.</small></p></li></ul>
+        <section className="dashboard-overview applications-overview" aria-labelledby="applications-overview-title">
+          <div className="current-applications"><div className="overview-heading"><div><p className="kicker">{inDemoWorkspace ? "DEMO APPLICATIONS" : "YOUR CURRENT APPLICATIONS"}</p><h2 id="applications-overview-title">Keep your next step clear.</h2></div><span>{jobs.length}</span></div>{jobs.slice(0, 2).map((job) => { const itemProgress = job.id === selectedJob?.id ? application : { step: 1, status: "New", next: "Add your CV" }; return <article className="application-status-row" key={job.id}><div><b>{job.title}</b><p>{job.company}</p><small>Step {itemProgress.step} of 6: {itemProgress.status}</small><em>Next: {itemProgress.next}</em></div><button className="outline-action small" onClick={() => selectRole(job.id)} disabled={runIsActive}>Continue</button></article>; })}</div>
+          <div className="quick-actions"><p className="kicker">QUICK ACTIONS</p><button onClick={() => setShowIntake(true)}>Upload CV</button><button onClick={() => void openRoleFinder()}>Find a job</button><button onClick={() => { setView("rehearse"); scrollToWorkspacePanel(); }}>Practice interview</button><button onClick={() => navigate("documents")}>View documents</button></div>
         </section>
-        <section className="dashboard-overview" aria-labelledby="dashboard-overview-title">
-          <div className="dashboard-greeting"><p className="section-kicker">YOUR HOME</p><h2 id="dashboard-overview-title">Good morning, {candidateFirstName}</h2><p>{usingDemoProfile ? "You are exploring Hussain Ahmed’s demo profile. Start with your own CV whenever you are ready." : "Here is the next useful action for the application you are preparing."}</p><button className="primary-action small" onClick={helpApplyToJob} disabled={!serviceOnline || runIsActive}>Start a new application <span>→</span></button></div>
-          <div className="current-applications"><div className="overview-heading"><div><p className="kicker">YOUR CURRENT APPLICATIONS</p><h3>Keep your next step clear.</h3></div><span>{jobs.length}</span></div>{jobs.slice(0, 2).map((job) => { const itemProgress = job.id === selectedJob?.id ? application : { step: 1, status: "New", next: "Add your CV" }; return <article className="application-status-row" key={job.id}><div><b>{job.title}</b><p>{job.company}</p><small>Step {itemProgress.step} of 6: {itemProgress.status}</small><em>Next: {itemProgress.next}</em></div><button className="outline-action small" onClick={() => selectRole(job.id)} disabled={runIsActive}>Continue</button></article>; })}</div>
-          <div className="quick-actions"><p className="kicker">QUICK ACTIONS</p><button onClick={() => serviceOnline ? setShowIntake(true) : explainServiceUnavailable()}>Upload CV</button><button onClick={openRoleFinder}>Find a job</button><button onClick={() => { setView("rehearse"); scrollToWorkspacePanel(); }}>Practice interview</button><button onClick={() => navigate("documents")}>View documents</button></div>
-        </section>
+        <details className="advanced-explainer"><summary><span><b>Advanced details</b><small>See the evidence-backed material HireSwarm can help you prepare.</small></span><i>⌄</i></summary><section className="outcomes-card" aria-labelledby="outcomes-title"><div><p className="section-kicker">WHAT YOU WILL GET</p><h2 id="outcomes-title">Useful material for one real application.</h2><p>HireSwarm prepares evidence-backed work. You review it and decide what to use.</p></div><ul><li><span>01</span><p><b>Fit summary</b><small>A requirement-by-requirement skills and evidence map.</small></p></li><li><span>02</span><p><b>Honest gap plan</b><small>Missing proof stays visible, with practical next steps.</small></p></li><li><span>03</span><p><b>Stronger CV points</b><small>Tailored wording linked to your original work examples.</small></p></li><li><span>04</span><p><b>Cover letter points</b><small>A draft grounded in the experience you can support.</small></p></li><li><span>05</span><p><b>Interview practice</b><small>Role-specific questions and evidence-based answer guidance.</small></p></li><li><span>06</span><p><b>Final packet</b><small>PDF or DOCX export only after your approval.</small></p></li></ul></section></details>
         {isBootstrapping ? <InitialWorkspaceSkeleton /> : <>
+        <section className="advanced-workspace-heading" aria-label="Advanced application details"><p className="section-kicker">ADVANCED APPLICATION DETAILS</p><h2>Open the six-step workspace when you are ready.</h2><p>Fit mapping, proof checks, practice, edits, and export stay here — after the first steps are clear.</p></section>
         <section className="progress-nav six-step-progress" aria-label="Six-step application path">
           {journeySteps.map((item, index) => {
             const done = item.id === "profile"
@@ -913,14 +974,14 @@ export default function Home() {
           })}
         </section>
         <div className="workspace-grid"><section className="main-column">
-          <article className="target-card"><div className="target-card-top"><div className="target-label"><span>{sourceLabel(selectedJob?.origin || "demo_fixture")}</span><b>Current job</b></div><div className="target-card-actions">{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="text-action" onClick={() => openOfficialListing(selectedJob.url)}>Open source ↗</button>}<button className="text-action" onClick={adaptSelectedJob}>Edit job details</button></div></div><div className="target-body"><div className="company-seal">{selectedJob?.company.split(" ").map((word) => word[0]).join("").slice(0, 2)}</div><div className="target-copy"><h2>{selectedJob?.title}</h2><p>{selectedJob?.company} <i>·</i> {selectedJob?.location} <i>·</i> {selectedJob?.type}</p><small className="source-line">{sourceDetail(selectedJob)} · updated {selectedJob?.posted || "not disclosed"}</small><div className="role-tags">{roleSkills(selectedJob).slice(0, 4).map((skill) => <span key={skill}>{skill}</span>)}</div></div><div className="fit-summary"><div className="score-orbit" style={{ "--score": `${market?.score || 0}%` } as React.CSSProperties}><span>{market?.score || "—"}<small>{market ? "%" : "FIT"}</small></span></div><div><small>FIT CHECK</small><b>{market ? "Evidence mapped" : "Not assessed yet"}</b><p>{market ? `${directMatches} direct strengths found` : selectedIsPractice ? "Demo role for safe practice" : "Match this job with your CV"}</p></div></div></div></article>
+          <article className="target-card"><div className="target-card-top"><div className="target-label"><span>{sourceLabel(selectedJob?.origin || "demo_fixture")}</span><b>{selectedIsPractice ? "Demo role" : "Current application"}</b></div><div className="target-card-actions">{selectedJob?.url && selectedJob.origin !== "demo_fixture" && <button className="text-action" onClick={() => openOfficialListing(selectedJob.url)}>Open source ↗</button>}<button className="text-action" onClick={adaptSelectedJob}>Edit job details</button></div></div><div className="target-body"><div className="company-seal">{selectedJob?.company.split(" ").map((word) => word[0]).join("").slice(0, 2)}</div><div className="target-copy"><h2>{selectedJob?.title}</h2><p>{selectedJob?.company} <i>·</i> {selectedJob?.location} <i>·</i> {selectedJob?.type}</p><small className="source-line">{sourceDetail(selectedJob)} · updated {selectedJob?.posted || "not disclosed"}</small><div className="role-tags">{roleSkills(selectedJob).slice(0, 4).map((skill) => <span key={skill}>{skill}</span>)}</div></div><div className="fit-summary"><div className="score-orbit" style={{ "--score": `${market?.score || 0}%` } as React.CSSProperties}><span>{market?.score || "—"}<small>{market ? "%" : "FIT"}</small></span></div><div><small>FIT CHECK</small><b>{market ? "Evidence mapped" : "Not assessed yet"}</b><p>{market ? `${directMatches} direct strengths found` : selectedIsPractice ? "Demo role for safe practice" : "Match this job with your CV"}</p></div></div></div></article>
           <section ref={workspacePanelRef} className="workspace-panel"><div className="panel-topline"><div><p className="kicker">{views.find((item) => item.id === view)?.number} / {views.find((item) => item.id === view)?.label?.toUpperCase()}</p><h2>{panelHeading(view, runState)}</h2></div><div className="live-context"><span className={cx("tiny-status", runState === "running" && "is-live")} />{activeAgent}</div></div>
-            {view === "match" && <Suspense fallback={<DeferredPanelLoading label="Loading fit details…" />}><DeferredMatchPanel selectedJob={selectedJob} candidate={candidate} market={market} onStart={() => void startRehearsal()} onSampleStart={startSampleFitCheck} onImport={() => setShowIntake(true)} onReviewRole={() => selectedJob && void loadJobDetail(selectedJob.id)} isRoleLoading={loadingJobId === selectedJob?.id} runState={runState} canRun={serviceOnline} usingDemoProfile={usingDemoProfile} selectedIsPractice={Boolean(selectedIsPractice)} /></Suspense>}
-            {view === "rehearse" && <Suspense fallback={<DeferredPanelLoading label="Loading practice workspace…" />}><DeferredRehearsalPanel turns={turns} currentTurn={currentTurn} runState={runState} onStart={() => void startRehearsal()} canRun={serviceOnline} /></Suspense>}
-            {view === "tailor" && <Suspense fallback={<DeferredPanelLoading label="Loading revisions…" />}><DeferredTailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} canRun={serviceOnline} runState={runState} /></Suspense>}
+            {view === "match" && <Suspense fallback={<DeferredPanelLoading label="Loading fit details…" />}><DeferredMatchPanel selectedJob={selectedJob} candidate={candidate} market={market} onStart={() => void startRehearsal()} onSampleStart={startSampleFitCheck} onImport={() => setShowIntake(true)} onReviewRole={() => selectedJob && void loadJobDetail(selectedJob.id)} onAddEvidence={addEvidenceForGap} onPracticeGap={practiceGap} isRoleLoading={loadingJobId === selectedJob?.id} runState={runState} canRun={canStartLiveAction} usingDemoProfile={usingDemoProfile} selectedIsPractice={Boolean(selectedIsPractice)} /></Suspense>}
+            {view === "rehearse" && <Suspense fallback={<DeferredPanelLoading label="Loading practice workspace…" />}><DeferredRehearsalPanel turns={turns} currentTurn={currentTurn} runState={runState} onStart={() => void startRehearsal()} canRun={canStartLiveAction} focusGap={practiceFocus} /></Suspense>}
+            {view === "tailor" && <Suspense fallback={<DeferredPanelLoading label="Loading revisions…" />}><DeferredTailorPanel patches={patches} coverLetter={coverLetter} coverLetterEvidenceIds={coverLetterEvidenceIds} showCoverLetter={showCoverLetter} onToggleCoverLetter={() => setShowCoverLetter((current) => !current)} onStart={() => void startRehearsal()} canRun={canStartLiveAction} runState={runState} /></Suspense>}
             {view === "review" && <Suspense fallback={<DeferredPanelLoading label="Loading review and export controls…" />}><DeferredReviewPanel runState={runState} patches={patches} gaps={market?.gaps || []} readiness={exportReadiness} selectedJob={selectedJob} onApprove={() => void approvePacket()} onExport={exportPacket} onOpenOfficial={openOfficialListing} serviceOnline={serviceOnline} isApproving={isApproving} isExporting={isExporting} /></Suspense>}
           </section>
-          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR ROLE SHORTLIST</p><h2>Choose your current job</h2><p className="shortlist-helper">Review one role at a time. Public roles keep their source link; pasted roles stay marked as yours.</p></div><div className="shortlist-actions"><button className="primary-action small" onClick={() => serviceOnline ? setShowLiveFinder(true) : explainServiceUnavailable()} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}>Find public roles <span>↗</span></button><button className="outline-action small" onClick={openBlankJobForm} disabled={!serviceOnline || runIsActive} aria-disabled={!serviceOnline || runIsActive}>Paste a listing</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} disabled={runIsActive} aria-label={runIsActive ? "Role switching is locked while the rehearsal runs" : `${job.id === selectedJob?.id ? "Current job" : "Review this role"} ${job.title} at ${job.company}`} onClick={() => selectRole(job.id)}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{roleSkills(job).slice(0, 3).join(" · ") || "Open to review skills"}</small></div><i>{job.id === selectedJob?.id ? "Current job" : "Review this role"}</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
+          <section ref={shortlistRef} className="shortlist-card"><div className="section-heading"><div><p className="kicker">YOUR ROLE SHORTLIST</p><h2>{selectedIsPractice ? "Choose a demo role" : "Choose your current application"}</h2><p className="shortlist-helper">Review one role at a time. Public roles keep their source link; pasted roles stay marked as yours.</p></div><div className="shortlist-actions"><button className="primary-action small" onClick={() => void openRoleFinder()} disabled={runIsActive} aria-disabled={runIsActive}>Find public roles <span>↗</span></button><button className="outline-action small" onClick={openBlankJobForm} disabled={runIsActive} aria-disabled={runIsActive}>Paste a listing</button></div></div><div className="job-grid">{visibleJobs.map((job) => <button key={job.id} className={cx("job-tile", job.id === selectedJob?.id && "selected")} disabled={runIsActive} aria-label={runIsActive ? "Role switching is locked while the rehearsal runs" : `${job.id === selectedJob?.id ? (selectedIsPractice ? "Demo role" : "Current application") : "Review this role"} ${job.title} at ${job.company}`} onClick={() => selectRole(job.id)}><span className="job-tile-index">{String(jobs.indexOf(job) + 1).padStart(2, "0")}</span><div><b>{job.title}</b><p>{job.company} · {job.location}</p><small>{roleSkills(job).slice(0, 3).join(" · ") || "Open to review skills"}</small></div><i>{job.id === selectedJob?.id ? (selectedIsPractice ? "Demo role" : "Current application") : "Review this role"}</i></button>)}</div>{jobs.length > 3 && <div className="shortlist-footer"><button className="text-action" onClick={() => setShowAllJobs((current) => !current)}>{showAllJobs ? "Show fewer roles" : `Show ${jobs.length - 3} more role${jobs.length - 3 === 1 ? "" : "s"}`} <span>{showAllJobs ? "↑" : "↓"}</span></button><small>{visibleJobs.length} of {jobs.length} targets shown</small></div>}</section>
         </section>
         <aside className="insight-column"><section className="evidence-card"><div className="section-heading"><div><p className="kicker">YOUR WORK EXAMPLES</p><h2>Work you can stand behind</h2><p className="evidence-explainer">A work example is a real CV line or project that supports a skill or claim.</p></div><span className="count-pill">{candidate.evidence.length}</span></div><div className="evidence-meter"><div className="meter-number"><b>{market ? coverage : "—"}</b><span>{market ? "%" : "not checked"}</span></div><div className="meter-copy"><b>Coverage, not confidence.</b><p>{market ? "Direct evidence is kept separate from related experience." : "Check a role to see evidence coverage for its requirements."}</p></div></div><EvidenceGroup label="Direct evidence" tone="mint" items={market ? market.verified_strengths.map((item) => item.skill) : evidencePreviewSkills} /><EvidenceGroup label="Related experience" tone="amber" items={market ? market.adjacent_strengths.map((item) => item.skill) : []} /><EvidenceGroup label="Gaps to address" tone="coral" items={market ? market.gaps.map((item) => item.skill) : []} /></section>
           <section className="proof-card"><p className="kicker">EXAMPLE FROM YOUR EVIDENCE</p><blockquote>“{proofItem?.source_text || "Import or write a literal work statement to begin."}”</blockquote><div><span>Work example {proofItem?.evidence_id || "—"}</span><b>{proofItem ? "Source-linked" : "Needs a source"}</b></div></section>
@@ -929,10 +990,10 @@ export default function Home() {
         </>}
       </div>
     </div>
-    {showIntake && <Suspense fallback={<DeferredDialogLoading label="Loading profile editor…" />}><CandidateModal candidate={candidate} isDemoProfile={usingDemoProfile} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); setUsingDemoProfile(true); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} serviceOnline={serviceOnline} runIsActive={runIsActive} /></Suspense>}
+    {showIntake && <Suspense fallback={<DeferredDialogLoading label="Loading profile editor…" />}><CandidateModal candidate={candidate} isDemoProfile={usingDemoProfile} onClose={() => setShowIntake(false)} onChange={updateCandidate} onRestore={() => { setCandidate(fallbackCandidate); setUsingDemoProfile(true); resetRun("match"); }} onAnalyze={() => void analyzeResume()} onUpload={(file) => void importResume(file)} isAnalyzing={isAnalyzing} isImporting={isImporting} serviceStatus={serviceStatus} runIsActive={runIsActive} /></Suspense>}
     {showJobForm && <Suspense fallback={<DeferredDialogLoading label="Loading role editor…" />}><JobModal title={manualTitle} company={manualCompany} location={manualLocation} url={manualUrl} description={manualDescription} onTitle={setManualTitle} onCompany={setManualCompany} onLocation={setManualLocation} onUrl={setManualUrl} onDescription={setManualDescription} onClose={() => setShowJobForm(false)} onSubmit={(event) => void addManualJob(event)} /></Suspense>}
     {showLiveFinder && <Suspense fallback={<DeferredDialogLoading label="Loading role search…" />}><LiveRolesModal onClose={() => setShowLiveFinder(false)} onDiscover={discoverPublicRoles} onConnect={connectPublicBoard} /></Suspense>}
-    {showGuide && <Suspense fallback={<DeferredDialogLoading label="Loading guide…" />}><HowItWorksModal onClose={() => setShowGuide(false)} onOpenProfile={() => { setShowGuide(false); setShowIntake(true); }} onOpenLive={() => { if (!serviceOnline) return explainServiceUnavailable(); setShowGuide(false); setShowLiveFinder(true); }} onOpenManual={() => { setShowGuide(false); openBlankJobForm(); }} /></Suspense>}
+    {showGuide && <Suspense fallback={<DeferredDialogLoading label="Loading guide…" />}><HowItWorksModal onClose={() => setShowGuide(false)} onOpenProfile={() => { setShowGuide(false); setShowIntake(true); }} onOpenLive={() => { setShowGuide(false); void openRoleFinder(); }} onOpenManual={() => { setShowGuide(false); openBlankJobForm(); }} /></Suspense>}
   </main>;
 }
 
@@ -959,8 +1020,8 @@ function HeroScene({ candidateName, evidenceCount, job, score, serviceStatus }: 
     <div className="orbit orbit-one" /><div className="orbit orbit-two" /><span className="scene-spark spark-one" /><span className="scene-spark spark-two" /><span className="scene-spark spark-three" />
     <article className="scene-card scene-evidence"><span className="scene-card-label"><i>✓</i> YOUR WORK EXAMPLES</span><b>{evidenceCount} work examples</b><p>Only source-linked work enters the flow.</p><div className="mini-bars"><i /><i /><i /></div></article>
     <article className="scene-core"><span className="core-halo" /><span className="core-orb">{scoreLabel}<small>{score === null ? "FIT CHECK" : "MAPPED"}</small></span><div><small>YOUR CASE</small><b>Evidence, not hype.</b></div></article>
-    <article className="scene-card scene-role"><span className="scene-card-label"><i>↗</i> CURRENT JOB</span><b>{job?.title || "Choose a job"}</b><p>{job?.company || "Bring in a real listing"}</p><span className="scene-chip">{job?.origin === "demo_fixture" ? "Demo role" : "You approve everything"}</span></article>
-    <article className="scene-person"><span>{initials(candidateName)}</span><div><small>APPLICANT</small><b>{candidateName}</b><p>{serviceStatus === "online" ? "Workspace connected" : serviceStatus === "checking" ? "Connecting workspace" : "Preview only · API unavailable"}</p></div></article>
+    <article className="scene-card scene-role"><span className="scene-card-label"><i>↗</i> {job?.origin === "demo_fixture" ? "DEMO ROLE" : "CURRENT APPLICATION"}</span><b>{job?.title || "Choose a job"}</b><p>{job?.company || "Bring in a real listing"}</p><span className="scene-chip">{job?.origin === "demo_fixture" ? "Demo role" : "You approve everything"}</span></article>
+    <article className="scene-person"><span>{initials(candidateName)}</span><div><small>APPLICANT</small><b>{candidateName}</b><p>{serviceStatus === "online" ? "Workspace ready" : serviceStatus === "checking" ? "Preparing workspace" : serviceStatus === "demo-only" ? "Sample-only workspace" : "Preview only · API unavailable"}</p></div></article>
   </div>;
 }
 

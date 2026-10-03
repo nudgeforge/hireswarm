@@ -39,7 +39,7 @@ Read the research, category gap, and source-policy rationale in [`docs/RESEARCH_
 | **Public job listing** | A current result fetched from a published public feed or official public board. The job preserves source, link, and retrieval/cache state. |
 | **Pasted by you** | Job text you added yourself. You choose whether to include a source URL. |
 
-The default workspace begins with Hussain Ahmed’s labeled demo profile so anyone can explore safely without a network/API key. Nothing is submitted, and the clear next actions are **Start with my CV**, **Find public roles**, or **Paste a job listing**.
+The default workspace begins with Hussain Ahmed’s labeled demo profile so anyone can explore safely without a network/API key. Nothing is submitted, and the clear next actions are **Start with my CV**, **Explore sample workflow**, **Find public roles**, or **Paste a job listing**.
 
 ### Exact real-data test — no account or API key needed
 
@@ -81,7 +81,7 @@ Open `http://localhost:3000`.
 
 ## A credible 90-second live demo
 
-1. Start with **Try a demo** to see Hussain Ahmed’s clearly labeled sample profile, or use **Find public roles** to search `Python developer` or connect a public Greenhouse/Lever board.
+1. Start with **Explore sample workflow** to see Hussain Ahmed’s clearly labeled sample profile, or use **Find public roles** to search `Python developer` or connect a public Greenhouse/Lever board.
 2. Point out the job source badge and official listing link. This is read-only discovery, not scraping or auto-apply.
 3. Select **Start with my CV** and import a real text-based CV. Show the in-memory/no-retention note and work-example count.
 4. Choose a public job and click **Check my fit**.

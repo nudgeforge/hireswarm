@@ -450,13 +450,23 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
     const verified = candidate?.evidence.filter((item) => item.status === "verified").length || 0;
     const partial = candidate?.evidence.filter((item) => item.status === "partial").length || 0;
     const unsupported = candidate?.evidence.filter((item) => item.status === "unverified").length || 0;
+    const gapCount = match?.gaps.length || 0;
+    const fitMapped = Boolean(match && job);
+    const nextActionTitle = fitMapped ? gapCount ? `Review ${gapCount} CV-to-job gap${gapCount === 1 ? "" : "s"}` : "Review your fit map" : candidate ? job ? "Check the role fit" : "Choose one opportunity" : "Start with your real experience";
+    const nextActionCopy = fitMapped ? gapCount ? "See each missing role requirement, the related CV evidence, and the direct proof needed to close it." : "Every detected role requirement has direct evidence in this CV. Review the fit map before starting agents." : candidate ? job ? "Map this role against the evidence in your CV before starting the agents." : "Add one manual job or search published listings when you are ready." : "Upload a PDF, DOCX, TXT, or paste your CV. We only work with what you provided.";
+    const nextActionLabel = fitMapped ? gapCount ? "View gap plan" : "Review fit" : candidate ? job ? "Check fit" : "Choose job" : "Add CV";
+    const nextActionStage: WorkflowStage = fitMapped ? "fit" : candidate ? job ? "fit" : "job" : "cv";
     return <>
       <section className="hs-page-hero hs-overview-hero"><div><p className="hs-eyebrow">CAREER WORKSPACE</p><h1>Welcome back.</h1><p>Your career workspace, powered by evidence.</p></div><button type="button" className="hs-button hs-button-primary" onClick={() => beginNewApplication()}><Icon name="plus" size={17} /> Create new application</button></section>
       <section className="hs-overview-grid">
         <article className="hs-overview-apps"><div className="hs-panel-title"><div><span>ACTIVE WORK</span><h2>Applications</h2></div><Link href="/applications" className="hs-text-link">View all <Icon name="arrow-right" size={15} /></Link></div>{applications.length ? <div className="hs-application-rows">{applications.slice(0, 4).map((record) => <button type="button" className="hs-application-row" key={record.id} onClick={() => openApplication(record)}><span className="hs-row-icon"><Icon name="briefcase" size={17} /></span><span><b>{record.job.title}</b><small>{record.job.company} · Updated {safeDate(record.updatedAt)}</small></span><em className={`hs-status hs-status-${record.runState}`}>{prettyStatus(record.runState)}</em><Icon name="arrow-right" size={16} /></button>)}</div> : <div className="hs-empty-inline"><Icon name="briefcase" size={22} /><div><b>No applications yet</b><p>Start with one CV and one real opportunity. Your application list will stay in this browser.</p></div><button type="button" className="hs-text-link" onClick={() => beginNewApplication()}>Create one <Icon name="arrow-right" size={15} /></button></div>}</article>
         <article className="hs-evidence-summary"><div className="hs-panel-title"><div><span>CURRENT EVIDENCE</span><h2>{candidate ? candidate.name || "Your CV" : "No CV loaded"}</h2></div><Link href="/evidence" className="hs-icon-button" aria-label="Open evidence library"><Icon name="arrow-up-right" size={17} /></Link></div>{candidate ? <><div className="hs-evidence-counts"><span><b>{verified}</b>Verified</span><span><b>{partial}</b>Needs review</span><span><b>{unsupported}</b>Unsupported</span></div><p className="hs-small-copy">Source statements from your current browser workspace. Replace the CV to refresh them.</p></> : <div className="hs-empty-compact"><Icon name="evidence" size={21} /><p>Upload a CV to build an evidence ledger.</p></div>}</article>
       </section>
-      <section className="hs-next-action"><div className="hs-next-icon"><Icon name={candidate ? "briefcase" : "document"} size={21} /></div><div><span>NEXT BEST STEP</span><h2>{candidate ? job ? "Check the role fit" : "Choose one opportunity" : "Start with your real experience"}</h2><p>{candidate ? job ? "Map this role against the evidence in your CV before starting the agents." : "Add one manual job or search published listings when you are ready." : "Upload a PDF, DOCX, TXT, or paste your CV. We only work with what you provided."}</p></div><button type="button" className="hs-button hs-button-secondary" onClick={() => { setView("new"); setStage(candidate ? job ? "fit" : "job" : "cv"); }}>{candidate ? job ? "Check fit" : "Choose job" : "Add CV"}<Icon name="arrow-right" size={16} /></button></section>
+      <section className="hs-next-action">
+        <div className="hs-next-icon"><Icon name={fitMapped && gapCount ? "warning" : candidate ? "briefcase" : "document"} size={21} /></div>
+        <div><span>NEXT BEST STEP</span><h2>{nextActionTitle}</h2><p>{nextActionCopy}</p></div>
+        <button type="button" className="hs-button hs-button-secondary" onClick={() => { setView("new"); setStage(nextActionStage); }}>{nextActionLabel}<Icon name="arrow-right" size={16} /></button>
+      </section>
     </>;
   }
 
@@ -490,8 +500,97 @@ export default function ProductWorkspace({ initialView }: { initialView: Product
 
   function evidenceLinks(items: { evidence_ids: string[] }[]) { const ids = Array.from(new Set(items.flatMap((item) => item.evidence_ids))); return ids.length ? <div className="hs-evidence-chips">{ids.map((id) => <button key={id} type="button" onClick={() => setView("evidence")}>{id}</button>)}</div> : <span className="hs-no-evidence">No direct evidence ID</span>; }
 
+  function gapPriority(gap: Match["gaps"][number]) {
+    const skill = gap.skill.trim().toLocaleLowerCase();
+    const isMustHave = Boolean(job?.must_have?.some((item) => item.trim().toLocaleLowerCase() === skill));
+    const isPreferred = Boolean(job?.preferred?.some((item) => item.trim().toLocaleLowerCase() === skill));
+    if (isMustHave || (!isPreferred && gap.severity === "must_have")) return { label: "Required", className: "required" };
+    if (isPreferred || gap.severity === "preferred") return { label: "Preferred", className: "preferred" };
+    return { label: "Direct proof needed", className: "direct-proof" };
+  }
+
+  function relatedEvidenceForGap(skill: string) {
+    return match?.adjacent_strengths.find((item) => item.skill.trim().toLocaleLowerCase() === skill.trim().toLocaleLowerCase());
+  }
+
+  function renderGapPlan() {
+    if (!match) return null;
+    if (!match.gaps.length) {
+      return <section className="hs-gap-plan hs-gap-plan-clear" aria-labelledby="gap-plan-title">
+        <header>
+          <span className="hs-gap-plan-icon"><Icon name="check" size={18} /></span>
+          <div>
+            <p className="hs-eyebrow">GAP-CLOSING PLAN</p>
+            <h3 id="gap-plan-title">No detected requirement gaps</h3>
+            <p>Every requirement extracted from this job has direct evidence in the CV currently loaded.</p>
+          </div>
+        </header>
+        <footer><Icon name="evidence" size={15} /><p>Keep the source CV accurate: this result only reflects the requirements HireSwarm could extract from the selected job.</p></footer>
+      </section>;
+    }
+
+    return <section className="hs-gap-plan" aria-labelledby="gap-plan-title">
+      <header>
+        <span className="hs-gap-plan-icon"><Icon name="warning" size={18} /></span>
+        <div>
+          <p className="hs-eyebrow">GAP-CLOSING PLAN</p>
+          <h3 id="gap-plan-title">What the role still needs from your CV</h3>
+            <p>See each role requirement detected in the selected job, why it is not directly supported, and what truthful proof would close the gap.</p>
+        </div>
+        <span className="hs-gap-count">{match.gaps.length} gap{match.gaps.length === 1 ? "" : "s"}</span>
+      </header>
+      <div className="hs-gap-plan-list">
+        {match.gaps.map((gap) => {
+          const priority = gapPriority(gap);
+          const related = relatedEvidenceForGap(gap.skill);
+          const currentGap = related
+            ? `Related CV evidence exists, but it does not verify direct ${gap.skill} experience.`
+            : `No direct, verified ${gap.skill} evidence was found in this CV.`;
+          const nextMove = related
+            ? `Keep the related evidence as context. Close this only with a real example where you used ${gap.skill} directly.`
+            : `First check for a real project or work example that is missing from your CV. If none exists, gain hands-on ${gap.skill} experience before claiming it.`;
+          return <article className="hs-gap-card" key={`${gap.skill}-${gap.severity}`}>
+            <div className="hs-gap-card-top">
+              <div><span>JOB REQUIREMENT</span><h4>{gap.skill}</h4></div>
+              <em className={priority.className}>{priority.label}</em>
+            </div>
+            <dl>
+              <div><dt>CV gap</dt><dd>{currentGap}</dd></div>
+              <div><dt>Next move</dt><dd>{nextMove}</dd></div>
+              <div><dt>What counts as proof</dt><dd>A truthful source-CV statement naming {gap.skill}, where you used it, your contribution, and a tangible outcome or scope.</dd></div>
+            </dl>
+            {related && <div className="hs-gap-related"><span>RELATED CV EVIDENCE</span>{evidenceLinks([related])}</div>}
+          </article>;
+        })}
+      </div>
+      <footer><Icon name="lock" size={15} /><p>Courses and certificates can support a learning plan, but HireSwarm will not treat them as direct work evidence unless your source CV truthfully documents the work.</p></footer>
+    </section>;
+  }
+
   function renderFitStage() {
-    return <section className="hs-work-card">{renderJobSummary()}{renderJobPreview()}<div className="hs-stage-heading"><span className="hs-stage-icon"><Icon name="evidence" size={20} /></span><div><p className="hs-eyebrow">STEP 3 · FIT MAP</p><h2>See your fit before you prepare.</h2><p>Market Scout separates direct support, related experience, and honest gaps.</p></div></div>{!match ? <div className="hs-fit-empty"><span><Icon name="evidence" size={25} /></span><h3>Map this job against your evidence.</h3><p>The fit check is read-only. It does not create a run, edit your CV, or unlock any export.</p><button type="button" className="hs-button hs-button-primary" disabled={matching || service === "offline"} onClick={() => void checkFit()}>{matching ? "Checking fit…" : "Check job fit"}<Icon name="arrow-right" size={16} /></button></div> : <><div className="hs-coverage"><div><span>EVIDENCE COVERAGE</span><b>{match.coverage}%</b></div><div className="hs-coverage-track"><i style={{ width: `${Math.min(100, Math.max(0, match.coverage))}%` }} /></div><p>Coverage reflects requirements with direct CV support. Rewording cannot increase the evidence score.</p></div><div className="hs-fit-columns"><section className="hs-fit-group matched"><header><span><Icon name="check" size={15} /></span><div><h3>Matched</h3><p>Direct support in your CV</p></div></header>{match.verified_strengths.length ? <ul>{match.verified_strengths.map((item) => <li key={item.skill}><b>{item.skill}</b>{evidenceLinks([item])}</li>)}</ul> : <p className="hs-empty-copy">No direct support found.</p>}</section><section className="hs-fit-group partial"><header><span><Icon name="spark" size={15} /></span><div><h3>Partially matched</h3><p>Related, but not equivalent</p></div></header>{match.adjacent_strengths.length ? <ul>{match.adjacent_strengths.map((item) => <li key={item.skill}><b>{item.skill}</b><small>{item.reason}</small>{evidenceLinks([item])}</li>)}</ul> : <p className="hs-empty-copy">No related experience identified.</p>}</section><section className="hs-fit-group missing"><header><span><Icon name="warning" size={15} /></span><div><h3>Missing</h3><p>Not claimed by your CV</p></div></header>{match.gaps.length ? <ul>{match.gaps.map((item) => <li key={item.skill}><b>{item.skill}</b><small>{item.severity.replaceAll("_", " ")}</small></li>)}</ul> : <p className="hs-empty-copy">No missing requirements surfaced.</p>}</section></div><div className="hs-stage-actions"><button type="button" className="hs-button hs-button-secondary" onClick={changeJob}>Choose another job</button><button type="button" className="hs-button hs-button-primary" onClick={() => goToStage("agents")}>Open agent control room <Icon name="arrow-right" size={16} /></button></div></>}</section>;
+    return <section className="hs-work-card">
+      {renderJobSummary()}
+      {renderJobPreview()}
+      <div className="hs-stage-heading">
+        <span className="hs-stage-icon"><Icon name="evidence" size={20} /></span>
+        <div><p className="hs-eyebrow">STEP 3 · FIT MAP</p><h2>See your fit before you prepare.</h2><p>Market Scout separates direct support, related experience, and honest gaps.</p></div>
+      </div>
+      {!match ? <div className="hs-fit-empty">
+        <span><Icon name="evidence" size={25} /></span>
+        <h3>Map this job against your evidence.</h3>
+        <p>The fit check is read-only. It does not create a run, edit your CV, or unlock any export.</p>
+        <button type="button" className="hs-button hs-button-primary" disabled={matching || service === "offline"} onClick={() => void checkFit()}>{matching ? "Checking fit…" : "Check job fit"}<Icon name="arrow-right" size={16} /></button>
+      </div> : <>
+        <div className="hs-coverage"><div><span>EVIDENCE COVERAGE</span><b>{match.coverage}%</b></div><div className="hs-coverage-track"><i style={{ width: `${Math.min(100, Math.max(0, match.coverage))}%` }} /></div><p>Coverage reflects requirements with direct CV support. Rewording cannot increase the evidence score.</p></div>
+        <div className="hs-fit-columns">
+          <section className="hs-fit-group matched"><header><span><Icon name="check" size={15} /></span><div><h3>Matched</h3><p>Direct support in your CV</p></div></header>{match.verified_strengths.length ? <ul>{match.verified_strengths.map((item) => <li key={item.skill}><b>{item.skill}</b>{evidenceLinks([item])}</li>)}</ul> : <p className="hs-empty-copy">No direct support found.</p>}</section>
+          <section className="hs-fit-group partial"><header><span><Icon name="spark" size={15} /></span><div><h3>Partially matched</h3><p>Related, but not equivalent</p></div></header>{match.adjacent_strengths.length ? <ul>{match.adjacent_strengths.map((item) => <li key={item.skill}><b>{item.skill}</b><small>{item.reason}</small>{evidenceLinks([item])}</li>)}</ul> : <p className="hs-empty-copy">No related experience identified.</p>}</section>
+          <section className="hs-fit-group missing"><header><span><Icon name="warning" size={15} /></span><div><h3>Missing</h3><p>Needs direct CV proof</p></div></header>{match.gaps.length ? <ul>{match.gaps.map((item) => <li key={item.skill}><b>{item.skill}</b><small>{gapPriority(item).label} · {item.severity === "adjacent_only" ? "related evidence only" : "no direct CV proof"}</small></li>)}</ul> : <p className="hs-empty-copy">No missing requirements surfaced.</p>}</section>
+        </div>
+        {renderGapPlan()}
+        <div className="hs-stage-actions"><button type="button" className="hs-button hs-button-secondary" onClick={changeJob}>Choose another job</button><button type="button" className="hs-button hs-button-primary" onClick={() => goToStage("agents")}>Open agent control room <Icon name="arrow-right" size={16} /></button></div>
+      </>}
+    </section>;
   }
 
   function agentStatus(name: string) { const last = [...events].reverse().find((item) => item.agent === name); if (runState === "running" && activeAgent === name) return "Working"; if (last) return last.type === "gap_detected" ? "Flagged a gap" : "Updated"; return runState === "running" ? "Queued" : "Waiting"; }

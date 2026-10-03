@@ -1,0 +1,402 @@
+/*
+ * Contrast guard
+ * --------------
+ * The workspace inherited a few older dark-surface rules while the current
+ * product surface is intentionally light.  Those collisions could leave pale
+ * helper copy on a pale card.  This final, scoped layer defines the readable
+ * light-surface treatment in one place without changing the dark sidebar or
+ * the green application hero.
+ */
+
+.workspace-shell {
+  --hs-ink: #14261e;
+  --hs-ink-soft: #3d5449;
+  --hs-ink-muted: #52685c;
+  --hs-line: rgba(20, 38, 30, .17);
+  --hs-line-strong: rgba(20, 38, 30, .32);
+}
+
+/* Header controls are always placed on a light command bar. */
+.workspace-shell .service-indicator small,
+.workspace-shell .command-copy small {
+  color: #465e52 !important;
+}
+
+.workspace-shell .service-indicator b,
+.workspace-shell .command-copy b,
+.workspace-shell .crumb-button,
+.workspace-shell .command-action,
+.workspace-shell .profile-button.command-profile {
+  color: #162b22;
+}
+
+@media (max-width: 820px) {
+  .workspace-shell .command-action .mobile-command-label,
+  .workspace-shell .profile-button.command-profile .mobile-command-label {
+    color: #29483a !important;
+  }
+}
+
+/* Clear recovery and sample-data boundaries: dark copy on deliberately pale
+   surfaces instead of the former pale-on-pale inherited text. */
+.workspace-shell .service-outage,
+.workspace-shell .demo-only-banner {
+  border-color: #e8b69d !important;
+  color: #402c22;
+  background: #fff3ea !important;
+}
+
+.workspace-shell .service-outage .section-kicker,
+.workspace-shell .demo-only-banner .section-kicker {
+  color: #934c36 !important;
+}
+
+.workspace-shell .service-outage h2,
+.workspace-shell .demo-only-banner h2 {
+  color: #3e281d !important;
+}
+
+.workspace-shell .service-outage p:not(.section-kicker),
+.workspace-shell .demo-only-banner p:not(.section-kicker) {
+  color: #584137 !important;
+}
+
+.workspace-shell .service-outage .service-outage-icon {
+  color: #fffaf7;
+  background: #b9563e !important;
+}
+
+.workspace-shell .service-outage button {
+  border-color: #a66149 !important;
+  color: #4b3025 !important;
+  background: #fffaf6 !important;
+}
+
+.workspace-shell .service-outage .service-outage-actions .outage-demo-action {
+  border-color: #9f563c !important;
+  color: #402419 !important;
+  background: #ffd19f !important;
+}
+
+.workspace-shell .demo-workspace-banner {
+  border-color: #e9bd79;
+  color: #3d2918;
+  background: #fff3df;
+}
+
+.workspace-shell .demo-workspace-banner > div > p {
+  color: #78502b !important;
+}
+
+.workspace-shell .demo-workspace-banner > div > h2 {
+  color: #3d2918 !important;
+}
+
+.workspace-shell .demo-workspace-banner > div > span {
+  color: #60462d !important;
+}
+
+.workspace-shell .demo-workspace-banner .outline-action {
+  border-color: #b98b56;
+  color: #35261a;
+  background: #fffdf8;
+}
+
+/* The collapsible explanation and the six-step heading live on paper cards. */
+.workspace-shell .advanced-explainer,
+.workspace-shell .advanced-workspace-heading {
+  border-color: var(--hs-line-strong);
+  background: #fffefa;
+}
+
+.workspace-shell .advanced-explainer summary > span > b,
+.workspace-shell .advanced-explainer .outcomes-card h2,
+.workspace-shell .advanced-explainer .outcomes-card b,
+.workspace-shell .advanced-workspace-heading h2 {
+  color: #172a21 !important;
+}
+
+.workspace-shell .advanced-explainer summary > span > small,
+.workspace-shell .advanced-explainer .outcomes-card p,
+.workspace-shell .advanced-explainer .outcomes-card small,
+.workspace-shell .advanced-workspace-heading > p:last-child {
+  color: #40584c !important;
+}
+
+.workspace-shell .advanced-explainer summary > i,
+.workspace-shell .advanced-workspace-heading .section-kicker {
+  color: #376753 !important;
+}
+
+/* The detailed fit panel is light.  Reset any legacy dark-card accents before
+   applying readable body and status colors. */
+.workspace-shell .workspace-panel .panel-topline,
+.workspace-shell .workspace-panel .match-story {
+  border-color: var(--hs-line);
+  background: #fffefa !important;
+}
+
+.workspace-shell .workspace-panel .panel-topline .kicker,
+.workspace-shell .workspace-panel .match-story .kicker {
+  color: #406855 !important;
+}
+
+.workspace-shell .workspace-panel .panel-topline h2,
+.workspace-shell .workspace-panel .match-story h3 {
+  color: #162a21 !important;
+}
+
+.workspace-shell .workspace-panel .live-context {
+  border-color: #bcd2c4 !important;
+  color: #365747 !important;
+  background: #edf5ef !important;
+  box-shadow: none !important;
+}
+
+.workspace-shell .requirement-header > span {
+  color: #45695a !important;
+}
+
+.workspace-shell .requirement-header > small {
+  color: #52685c !important;
+}
+
+.workspace-shell .requirement-table-head {
+  border-color: #c9d6cd !important;
+  color: #314f41 !important;
+  background: #e6eee8 !important;
+}
+
+.workspace-shell .requirement-table-head > span {
+  color: #314f41 !important;
+}
+
+/* Practice, tailoring, and review reuse the paper panel.  Their original
+   dark-mode copy is overridden explicitly so the route stays legible in every
+   loading, paused, and empty state. */
+.workspace-shell .rehearsal-empty,
+.workspace-shell .tailor-empty,
+.workspace-shell .revision-wrap,
+.workspace-shell .letter-view,
+.workspace-shell .review-layout {
+  color: #1b3026;
+  background: #fffefa !important;
+}
+
+.workspace-shell .rehearsal-empty .kicker,
+.workspace-shell .tailor-empty .kicker,
+.workspace-shell .revision-toolbar span,
+.workspace-shell .revision-toolbar p,
+.workspace-shell .review-lead .kicker {
+  color: #486858 !important;
+}
+
+.workspace-shell .rehearsal-empty h3,
+.workspace-shell .tailor-empty h3,
+.workspace-shell .review-lead h3,
+.workspace-shell .revision-section,
+.workspace-shell .after {
+  color: #172a21 !important;
+}
+
+.workspace-shell .rehearsal-empty > div > p,
+.workspace-shell .tailor-empty > div > p,
+.workspace-shell .review-lead p,
+.workspace-shell .revision-meta,
+.workspace-shell .revision-meta em,
+.workspace-shell .before,
+.workspace-shell .locked-action {
+  color: #40584c !important;
+}
+
+.workspace-shell .speaker-card.hr {
+  border-color: #c8d8cd !important;
+  color: #244a3b !important;
+  background: #f0f5f1 !important;
+}
+
+.workspace-shell .speaker-card.candidate {
+  border-color: #b8d8c1 !important;
+  color: #1d4b39 !important;
+  background: #e9f6eb !important;
+}
+
+.workspace-shell .speaker-card span,
+.workspace-shell .question-bubble span,
+.workspace-shell .answer-bubble span {
+  color: #446957 !important;
+}
+
+.workspace-shell .speaker-card p,
+.workspace-shell .question-bubble p,
+.workspace-shell .answer-bubble p {
+  color: #213b2f !important;
+}
+
+.workspace-shell .question-bubble {
+  border-color: #c8d8cd !important;
+  background: #f1f5f1 !important;
+}
+
+.workspace-shell .answer-bubble {
+  border-color: #b8d8c1 !important;
+  background: #e9f6eb !important;
+}
+
+.workspace-shell .review-check {
+  border-color: #cbd8cf !important;
+  background: #f7faf6 !important;
+}
+
+.workspace-shell .review-check p,
+.workspace-shell .readiness-note,
+.workspace-shell .readiness-note b {
+  color: #365747 !important;
+}
+
+/* Modals are also paper surfaces.  Keep form text and explanatory text clear
+   if an older dark dialog selector has greater specificity. */
+.workspace-shell .modal-card {
+  color: #1b3026;
+  background: #fffefa !important;
+}
+
+.workspace-shell .modal-card h2,
+.workspace-shell .modal-card .source-option h3,
+.workspace-shell .modal-card .testing-guide b {
+  color: #172a21 !important;
+}
+
+.workspace-shell .modal-card label,
+.workspace-shell .modal-card .modal-copy,
+.workspace-shell .modal-card .source-option p,
+.workspace-shell .modal-card .source-footnote,
+.workspace-shell .modal-card .testing-guide p {
+  color: #40584c !important;
+}
+
+.workspace-shell .modal-card input,
+.workspace-shell .modal-card textarea,
+.workspace-shell .modal-card select {
+  border-color: #9eb7a7 !important;
+  color: #1b3026 !important;
+  background: #ffffff !important;
+}
+
+.workspace-shell .modal-card input::placeholder,
+.workspace-shell .modal-card textarea::placeholder {
+  color: #667d70 !important;
+  opacity: 1;
+}
+
+.workspace-shell .modal-card .modal-evidence,
+.workspace-shell .modal-card .modal-service-note {
+  color: #315b48 !important;
+  background: #edf7ef !important;
+}
+
+.workspace-shell .modal-card .modal-evidence b,
+.workspace-shell .modal-card .modal-service-note b {
+  color: #254b3a !important;
+}
+
+.workspace-shell .modal-card .upload-drop {
+  color: #315b48 !important;
+  background: #f2f9ee !important;
+}
+
+.workspace-shell .modal-card .upload-drop b {
+  color: #1b3026 !important;
+}
+
+.workspace-shell .modal-card .upload-drop small {
+  color: #40584c !important;
+}
+
+/* Guided onboarding uses the same light paper surface. */
+.guided-demo-line,
+.guided-progress li,
+.guided-progress li > span {
+  color: #5a6d63;
+}
+
+/* Modal-specific utility elements that previously inherited their old
+   dark-surface treatment. */
+.workspace-shell .modal-card .testing-guide li > span {
+  color: #2c684f !important;
+  background: #e6f5eb !important;
+}
+
+.workspace-shell .modal-card .guide-boundary {
+  border-color: #e5c98d !important;
+  color: #5f4828 !important;
+  background: #fff8e9 !important;
+}
+
+.workspace-shell .modal-card .guide-boundary b {
+  color: #6a491b !important;
+}
+
+.workspace-shell .modal-card .guide-status {
+  color: #496257 !important;
+}
+
+.workspace-shell .engine-menu .menu-overline {
+  color: #47695a !important;
+}
+
+.workspace-shell .engine-menu button.selected > i {
+  color: #28624d !important;
+}
+
+/* Honest-gap actions, generated CV improvements, and interview turns all
+   appear on paper cards after an evidence run. */
+.workspace-shell .gap-action-row small b {
+  color: #704b3b !important;
+}
+
+.workspace-shell .gap-action-row .gap-action-buttons .text-action {
+  color: #28614b !important;
+}
+
+.workspace-shell .application-proof-card .proof-why b {
+  color: #245d48 !important;
+}
+
+.workspace-shell .application-proof-card .proof-why p {
+  color: #3e5f51 !important;
+}
+
+.workspace-shell .application-proof-card .use-this-in > span {
+  color: #476355 !important;
+}
+
+.workspace-shell .application-proof-card .use-this-in > i {
+  color: #28614b !important;
+}
+
+.workspace-shell .conversation-turn .turn-marker {
+  color: #455f51 !important;
+}
+
+.workspace-shell .conversation-turn .question-bubble small b {
+  color: #315f4b !important;
+}
+
+.workspace-shell .conversation-turn .status-word.supported {
+  color: #2d6a50 !important;
+}
+
+.workspace-shell .conversation-turn .status-word.partial {
+  color: #80591c !important;
+}
+
+.workspace-shell .approve-action.export {
+  border-color: #1e6a50 !important;
+  color: #ffffff !important;
+  background: #247a5d !important;
+}
+
+.workspace-shell .approve-action.export:hover {
+  background: #1c664d !important;
+}

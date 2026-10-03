@@ -1,1 +1,1 @@
-export { default } from "../components/WorkspaceClient";
+export { default } from "../components/CleanApp";

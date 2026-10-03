@@ -1,5 +1,5 @@
-import GuidedLanding from "./components/GuidedLanding";
+import CleanApp from "./components/CleanApp";
 
 export default function Home() {
-  return <GuidedLanding />;
+  return <CleanApp />;
 }

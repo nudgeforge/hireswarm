@@ -1,5 +1,5 @@
-import CleanApp from "./components/CleanApp";
+import MarketingLanding from "./components/MarketingLanding";
 
 export default function Home() {
-  return <CleanApp />;
+  return <MarketingLanding />;
 }
